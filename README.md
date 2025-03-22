@@ -1,4 +1,4 @@
-# [TEAM ACVLAB][NTIRE 2025 Image Shadow Removal Challenge](https://cvlai.net/ntire/2025/) @ [CVPR 2025](https://cvpr.thecvf.com/)
+# [TEAM ACVLAB][NTIRE25-Image Shadow Removal Challenge](https://cvlai.net/ntire/2025/) @ [CVPR 2025](https://cvpr.thecvf.com/)
 
 ## Link to the codes/executables of the solution(s):
 * [Checkpoints](https://drive.google.com/file/d/1USD5sLvEcgFqIg7BDzc1OuInzSx3GnUN/view?usp=drive_link)
