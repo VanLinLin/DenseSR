@@ -41,7 +41,10 @@ git clone https://github.com/DepthAnything/Depth-Anything-V2.git
 ```
 2. Download the [pretrain model of depth anything v2](https://huggingface.co/depth-anything/Depth-Anything-V2-Large/resolve/main/depth_anything_v2_vitl.pth?download=true)
 
-3. Run ```python Depth-Anything-V2/get_depth_normap.py```
+3. Run ```get_depth_normap.py``` to create depth and normal map.
+```python
+python get_depth_normap.py
+```
 
 Now folder structure will be
 ```bash
@@ -65,12 +68,12 @@ output_dir
 ├──...
 ```
 
-4. Clone [DINOv2](https://github.com/facebookresearch/dinov2.git)
+1. Clone [DINOv2](https://github.com/facebookresearch/dinov2.git)
 ```bash
 git clone https://github.com/facebookresearch/dinov2.git
 ```
 
-5. Download [shadow removal weight](https://drive.google.com/file/d/1USD5sLvEcgFqIg7BDzc1OuInzSx3GnUN/view?usp=drive_link)
+1. Download [shadow removal weight](https://drive.google.com/file/d/1USD5sLvEcgFqIg7BDzc1OuInzSx3GnUN/view?usp=drive_link)
 
 ```bash 
 gdown 1USD5sLvEcgFqIg7BDzc1OuInzSx3GnUN
