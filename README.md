@@ -81,3 +81,5 @@ gdown 1USD5sLvEcgFqIg7BDzc1OuInzSx3GnUN
 ```bash
 bash run_test.sh
 ```
+## License and Acknowledgement
+This code repository is release under [MIT License](https://github.com/VanLinLin/NTIRE25_Shadow_Removal?tab=MIT-1-ov-file#readme).
