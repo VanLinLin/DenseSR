@@ -19,7 +19,7 @@ parser.add_argument('--input_dir', default='test_dir',
     type=str, help='Directory of validation images')
 parser.add_argument('--result_dir', default='./output_dir',
     type=str, help='Directory for results')
-parser.add_argument('--weights', default='best_model_densefusion.pth'
+parser.add_argument('--weights', default='best_WSRD.pth'
                     ,type=str, help='Path to weights')
 parser.add_argument('--arch', type=str, default='DenseSR', help='archtechture')
 parser.add_argument('--batch_size', default=1, type=int, help='Batch size for dataloader')
