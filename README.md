@@ -1,10 +1,33 @@
-# [TEAM ACVLAB][NTIRE25-Image Shadow Removal Challenge](https://cvlai.net/ntire/2025/) @ [CVPR 2025](https://cvpr.thecvf.com/)
+<h1 align="center">[ACMMM 2025] DenseSR: Image Shadow Removal as Dense Prediction</h1>
+<p align="center">Yu-Fan Lin<sup>1</sup>, Chia-ming Lee<sup>1</sup>, Chih-Chung Hsu<sup>2</sup></p>
+<p align="center"><sup>1</sup>National Cheng Kung University&nbsp;&nbsp;<sup>2</sup>National Yang Ming Chiao Tung University</p>
 
-## Link to the codes/executables of the solution(s):
-* [Checkpoints](https://drive.google.com/file/d/1USD5sLvEcgFqIg7BDzc1OuInzSx3GnUN/view?usp=drive_link)
-* Input / Output file
+<div align="center">
 
-## Environments
+[![arXiv](https://img.shields.io/badge/DenseSR-arXiv-red.svg)](https://www.arxiv.org/abs/2507.16472)
+
+</div>
+
+<details>
+<summary>Abstract</summary>
+Shadows are a common factor degrading image quality. Single-image shadow removal (SR), particularly under challenging indirect illumination, is hampered by non-uniform content degradation and inherent ambiguity. Consequently, traditional methods often fail to simultaneously recover intra-shadow details and maintain sharp boundaries, resulting in inconsistent restoration and blurring that negatively affect both downstream applications and the overall viewing experience. To overcome these limitations, we propose the DenseSR, approaching the problem from a dense prediction perspective to emphasize restoration quality. This framework uniquely synergizes two key strategies: (1) deep scene understanding guided by geometric-semantic priors to resolve ambiguity and implicitly localize shadows, and (2) high-fidelity restoration via a novel Dense Fusion Block (DFB) in the decoder. The DFB employs adaptive component processing-using an Adaptive Content Smoothing Module (ACSM) for consistent appearance and a Texture-Boundary Recuperation Module (TBRM) for fine textures and sharp boundaries-thereby directly tackling the inconsistent restoration and blurring issues. These purposefully processed components are effectively fused, yielding an optimized feature representation preserving both consistency and fidelity. Extensive experimental results demonstrate the merits of our approach over existing methods.
+</details>
+
+## ⭐ Citation
+If you find this project useful, please consider citing us and giving us a star.
+```bash
+@misc{lin2025densesrimageshadowremoval,
+      title={DenseSR: Image Shadow Removal as Dense Prediction}, 
+      author={Yu-Fan Lin and Chia-Ming Lee and Chih-Chung Hsu},
+      year={2025},
+      eprint={2507.16472},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2507.16472}, 
+}
+```
+
+## 🌱 Environments
 ```bash
 conda create -n ntire_shadow python=3.9 -y
 
@@ -16,15 +39,16 @@ pip install -r requirements.txt
 
 ```
 
-## Folder Structure
+## 📂 Folder Structure
+You can download WSRD dataset from [here](https://github.com/fvasluianu97/WSRD-DNSR).
 ```bash
 test_dir
-├── Origin          <- Put the shadow affected images in this folder
+├── origin          <- Put the shadow affected images in this folder
 │   ├── 0000.png
 │   ├── 0001.png
 │   ├── ...
-├── Depth
-├── Normal
+├── depth
+├── normal
 
 
 output_dir
@@ -33,7 +57,7 @@ output_dir
 ├──...
 ```
 
-## How to test?
+## ✨ How to test?
 1. Clone [Depth anything v2](https://github.com/DepthAnything/Depth-Anything-V2.git)
 
 ```bash
@@ -49,15 +73,15 @@ python get_depth_normap.py
 Now folder structure will be
 ```bash
 test_dir
-├── Origin
+├── origin
 │   ├── 0000.png
 │   ├── 0001.png
 │   ├── ...
-├── Depth
+├── depth
 │   ├── 0000.npy
 │   ├── 0001.npy
 │   ├── ...
-├── Normal
+├── ormal
 │   ├── 0000.npy
 │   ├── 0001.npy
 │   ├── ...
@@ -68,15 +92,15 @@ output_dir
 ├──...
 ```
 
-1. Clone [DINOv2](https://github.com/facebookresearch/dinov2.git)
+4. Clone [DINOv2](https://github.com/facebookresearch/dinov2.git)
 ```bash
 git clone https://github.com/facebookresearch/dinov2.git
 ```
 
-1. Download [shadow removal weight](https://drive.google.com/file/d/1USD5sLvEcgFqIg7BDzc1OuInzSx3GnUN/view?usp=drive_link)
+5. Download [shadow removal weight](https://drive.google.com/file/d/1of3KLSVhaXlsX3jasuwdPKBwb4O4hGZD/view?usp=drive_link)
 
 ```bash 
-gdown 1USD5sLvEcgFqIg7BDzc1OuInzSx3GnUN
+gdown 1of3KLSVhaXlsX3jasuwdPKBwb4O4hGZD
 ```
 
 6. Run ```run_test.sh``` to get inference results.
@@ -84,5 +108,17 @@ gdown 1USD5sLvEcgFqIg7BDzc1OuInzSx3GnUN
 ```bash
 bash run_test.sh
 ```
-## License and Acknowledgement
+
+## 📰 News
+&#10004; 2025/08/11 Release WSRD pretrained model
+
+&#10004; 2025/08/11 Release inference code
+
+&#10004; 2025/07/05 Paper Accepted by ACMMM'25
+
+## 🛠️ TODO
+&#x25FB; Release training code
+&#x25FB; Release other pretrained model
+
+## 📜 License and 
 This code repository is release under [MIT License](https://github.com/VanLinLin/NTIRE25_Shadow_Removal?tab=MIT-1-ov-file#readme).

@@ -7,7 +7,7 @@ from einops import rearrange, repeat
 import math
 from utils import grid_sample
 
-from freqfusion import FreqFusion
+from densefusion import DesneFusion
 
 #########################################
 
@@ -1114,7 +1114,7 @@ class ShadowFormer(nn.Module):
 
 
 
-class ShadowFormerFreq(nn.Module):
+class DenseSR(nn.Module):
     def __init__(self, img_size=256, in_chans=3,
                 embed_dim=32, depths=[2, 2, 2, 2, 2, 2, 2, 2, 2], num_heads=[1, 2, 4, 8, 16, 16, 8, 4, 2],
                 win_size=8, mlp_ratio=4., qkv_bias=True, qk_scale=None,
@@ -1265,13 +1265,13 @@ class ShadowFormerFreq(nn.Module):
         self.relu = nn.LeakyReLU()
         self.apply(self._init_weights)
 
-        self.freqfusion1 = FreqFusion(hr_channels=256,
+        self.densefusion1 = DesneFusion(hr_channels=256,
                                       lr_channels=512)
     
-        self.freqfusion2 = FreqFusion(hr_channels=128,
+        self.densefusion2 = DesneFusion(hr_channels=128,
                                       lr_channels=256)     
            
-        self.freqfusion3 = FreqFusion(hr_channels=64,
+        self.densefusion3 = DesneFusion(hr_channels=64,
                                       lr_channels=128)  
 
     def _init_weights(self, m):
@@ -1362,7 +1362,7 @@ class ShadowFormerFreq(nn.Module):
         deconv0_B_C_H_W = deconv0.view(deconv0.shape[0], int(deconv0.shape[1]**0.5), int(deconv0.shape[1]**0.5), 256).permute(0, 3, 1, 2)
         # print(f'1.{deconv0_B_C_H_W.shape=}')  # 1, 256, 64, 64
 
-        _, deconv0_B_C_H_W, lr_feat = self.freqfusion1(hr_feat=deconv0_B_C_H_W, lr_feat=conv3_B_C_H_W)  # 1, 256, 64, 64 & 1, 512, 32, 32
+        _, deconv0_B_C_H_W, lr_feat = self.densefusion1(hr_feat=deconv0_B_C_H_W, lr_feat=conv3_B_C_H_W)  # 1, 256, 64, 64 & 1, 512, 32, 32
         # print(f'1.{deconv0.shape=}, {lr_feat.shape=}')  # deconv0.shape=torch.Size([1, 256, 64, 64]), lr_feat.shape=torch.Size([1, 512, 64, 64])
 
         deconv0 = deconv0_B_C_H_W.view(deconv0_B_C_H_W.shape[0], 256, -1).permute(0, 2, 1)
@@ -1382,7 +1382,7 @@ class ShadowFormerFreq(nn.Module):
         deconv1_B_C_H_W = deconv1.view(deconv1.shape[0], int(deconv1.shape[1]**0.5), int(deconv1.shape[1]**0.5), 128).permute(0, 3, 1, 2)
         # print(f'2.{deconv1_B_C_H_W.shape=}')  # 1, 128, 128, 128
 
-        _, deconv1_B_C_H_W, lr_feat = self.freqfusion2(hr_feat=deconv1_B_C_H_W, lr_feat=deconv0_B_C_H_W)  # 1, 128, 128, 128 & 1, 256, 64, 64
+        _, deconv1_B_C_H_W, lr_feat = self.densefusion2(hr_feat=deconv1_B_C_H_W, lr_feat=deconv0_B_C_H_W)  # 1, 128, 128, 128 & 1, 256, 64, 64
 
         # print(f'2.{deconv1_B_C_H_W.shape=}, {lr_feat.shape=}')  # hr_feat.shape=torch.Size([1, 128, 128, 128]), lr_feat.shape=torch.Size([1, 256, 128, 128])
 
@@ -1403,7 +1403,7 @@ class ShadowFormerFreq(nn.Module):
         deconv2_B_C_H_W = deconv2.view(deconv2.shape[0], int(deconv2.shape[1]**0.5), int(deconv2.shape[1]**0.5), 64).permute(0, 3, 1, 2)
         # print(f'3.{deconv2_B_C_H_W.shape=}')
 
-        _, deconv2_B_C_H_W, lr_feat = self.freqfusion3(hr_feat=deconv2_B_C_H_W, lr_feat=deconv1_B_C_H_W)  # 1, 64, 256, 256 & 1, 128, 128, 128
+        _, deconv2_B_C_H_W, lr_feat = self.densefusion3(hr_feat=deconv2_B_C_H_W, lr_feat=deconv1_B_C_H_W)  # 1, 64, 256, 256 & 1, 128, 128, 128
 
         # print('*'*5, f'3.{deconv2_B_C_H_W.shape=}, {lr_feat.shape=}')
 

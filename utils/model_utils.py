@@ -56,7 +56,7 @@ def load_optim(optimizer, weights):
     return lr
 
 def get_arch(opt):
-    from model import ShadowFormer, ShadowFormerFreq
+    from model import ShadowFormer, DenseSR
     arch = opt.arch
 
     print('You choose '+arch+'...')
@@ -64,8 +64,8 @@ def get_arch(opt):
         model_restoration = ShadowFormer(img_size=opt.train_ps,embed_dim=opt.embed_dim,
                                         win_size=opt.win_size,token_projection=opt.token_projection,
                                         token_mlp=opt.token_mlp)
-    elif arch == 'ShadowFormerFreq':
-        model_restoration = ShadowFormerFreq(img_size=opt.train_ps,embed_dim=opt.embed_dim,
+    elif arch == 'DenseSR':
+        model_restoration = DenseSR(img_size=opt.train_ps,embed_dim=opt.embed_dim,
                                         win_size=opt.win_size,token_projection=opt.token_projection,
                                         token_mlp=opt.token_mlp)
     else:

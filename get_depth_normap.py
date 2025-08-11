@@ -25,22 +25,23 @@ def parse_args():
 def generate_depth_maps(source_root, model_path):
     source_root = Path(source_root)
     origin = source_root / 'origin'
-    to_thermal_list = [origin]
+    to_depth_list = [origin]
 
     model = DepthAnythingV2(encoder='vitl', features=256, out_channels=[256, 512, 1024, 1024]).cuda()
     model.load_state_dict(torch.load(model_path, map_location='cpu'))
     model.eval()
 
-    thermal_path = source_root / 'depth'
+    depth_path = source_root / 'depth'
+    depth_path.mkdir(parents=True, exist_ok=True)
 
     with torch.inference_mode():
-        for to_thermal_item in to_thermal_list:
-            folder_name = to_thermal_item.stem
-            dst_path = thermal_path
+        for to_depth_item in to_depth_list:
+            folder_name = to_depth_item.stem
+            dst_path = depth_path
 
             dst_path.mkdir(parents=True, exist_ok=True)
             
-            bar = tqdm(to_thermal_item.glob('*'))
+            bar = tqdm(to_depth_item.glob('*'))
 
             for image_path in bar:
                 try:
@@ -50,14 +51,13 @@ def generate_depth_maps(source_root, model_path):
                     depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
                     depth = depth.astype(np.uint8)
 
-                    print(depth.shape)
                     np.save(f'{dst_path}/{image_path.stem}.npy', depth)
 
                 except Exception as e:
                     print(e)
                     continue
     
-    return thermal_path
+    return depth_path
 
 
 def calculate_normal_map(img_path: Path, ksize=5):

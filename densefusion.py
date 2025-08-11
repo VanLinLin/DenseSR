@@ -7,59 +7,41 @@ from torch.utils.checkpoint import checkpoint
 import warnings
 import numpy as np
 
-try:
-    from mmcv.ops.carafe import normal_init, xavier_init, carafe
-except ImportError:
 
-    def xavier_init(module: nn.Module,
-                    gain: float = 1,
-                    bias: float = 0,
-                    distribution: str = 'normal') -> None:
-        assert distribution in ['uniform', 'normal']
-        if hasattr(module, 'weight') and module.weight is not None:
-            if distribution == 'uniform':
-                nn.init.xavier_uniform_(module.weight, gain=gain)
-            else:
-                nn.init.xavier_normal_(module.weight, gain=gain)
-        if hasattr(module, 'bias') and module.bias is not None:
-            nn.init.constant_(module.bias, bias)
+def xavier_init(module: nn.Module,
+                gain: float = 1,
+                bias: float = 0,
+                distribution: str = 'normal') -> None:
+    assert distribution in ['uniform', 'normal']
+    if hasattr(module, 'weight') and module.weight is not None:
+        if distribution == 'uniform':
+            nn.init.xavier_uniform_(module.weight, gain=gain)
+        else:
+            nn.init.xavier_normal_(module.weight, gain=gain)
+    if hasattr(module, 'bias') and module.bias is not None:
+        nn.init.constant_(module.bias, bias)
 
-    def carafe(x, normed_mask, kernel_size, group=1, up=1):
-            b, c, h, w = x.shape
-            _, m_c, m_h, m_w = normed_mask.shape
-            # print('x', x.shape)
-            # print('normed_mask', normed_mask.shape)
-            # assert m_c == kernel_size ** 2 * up ** 2
-            assert m_h == up * h
-            assert m_w == up * w
-            pad = kernel_size // 2
-            # print(pad)
-            pad_x = F.pad(x, pad=[pad] * 4, mode='reflect')
-            # print(pad_x.shape)
-            unfold_x = F.unfold(pad_x, kernel_size=(kernel_size, kernel_size), stride=1, padding=0)
-            # unfold_x = unfold_x.reshape(b, c, 1, kernel_size, kernel_size, h, w).repeat(1, 1, up ** 2, 1, 1, 1, 1)
-            unfold_x = unfold_x.reshape(b, c * kernel_size * kernel_size, h, w)
-            unfold_x = F.interpolate(unfold_x, scale_factor=up, mode='nearest')
-            # normed_mask = normed_mask.reshape(b, 1, up ** 2, kernel_size, kernel_size, h, w)
-            unfold_x = unfold_x.reshape(b, c, kernel_size * kernel_size, m_h, m_w)
-            normed_mask = normed_mask.reshape(b, 1, kernel_size * kernel_size, m_h, m_w)
-            res = unfold_x * normed_mask
-            # test
-            # res[:, :, 0] = 1
-            # res[:, :, 1] = 2
-            # res[:, :, 2] = 3
-            # res[:, :, 3] = 4
-            res = res.sum(dim=2).reshape(b, c, m_h, m_w)
-            # res = F.pixel_shuffle(res, up)
-            # print(res.shape)
-            # print(res)
-            return res
+def carafe(x, normed_mask, kernel_size, group=1, up=1):
+        b, c, h, w = x.shape
+        _, m_c, m_h, m_w = normed_mask.shape
+        assert m_h == up * h
+        assert m_w == up * w
+        pad = kernel_size // 2
+        pad_x = F.pad(x, pad=[pad] * 4, mode='reflect')
+        unfold_x = F.unfold(pad_x, kernel_size=(kernel_size, kernel_size), stride=1, padding=0)
+        unfold_x = unfold_x.reshape(b, c * kernel_size * kernel_size, h, w)
+        unfold_x = F.interpolate(unfold_x, scale_factor=up, mode='nearest')
+        unfold_x = unfold_x.reshape(b, c, kernel_size * kernel_size, m_h, m_w)
+        normed_mask = normed_mask.reshape(b, 1, kernel_size * kernel_size, m_h, m_w)
+        res = unfold_x * normed_mask
+        res = res.sum(dim=2).reshape(b, c, m_h, m_w)
+        return res
 
-    def normal_init(module, mean=0, std=1, bias=0):
-        if hasattr(module, 'weight') and module.weight is not None:
-            nn.init.normal_(module.weight, mean, std)
-        if hasattr(module, 'bias') and module.bias is not None:
-            nn.init.constant_(module.bias, bias)
+def normal_init(module, mean=0, std=1, bias=0):
+    if hasattr(module, 'weight') and module.weight is not None:
+        nn.init.normal_(module.weight, mean, std)
+    if hasattr(module, 'bias') and module.bias is not None:
+        nn.init.constant_(module.bias, bias)
 
 
 def constant_init(module, val, bias=0):
@@ -90,26 +72,12 @@ def resize(input,
     return F.interpolate(input, size, scale_factor, mode, align_corners)
 
 def hamming2D(M, N):
-    """
-    生成二维Hamming窗
-
-    参数：
-    - M：窗口的行数
-    - N：窗口的列数
-
-    返回：
-    - 二维Hamming窗
-    """
-    # 生成水平和垂直方向上的Hamming窗
-    # hamming_x = np.blackman(M)
-    # hamming_x = np.kaiser(M)
     hamming_x = np.hamming(M)
     hamming_y = np.hamming(N)
-    # 通过外积生成二维Hamming窗
     hamming_2d = np.outer(hamming_x, hamming_y)
     return hamming_2d
 
-class FreqFusion(nn.Module):
+class DesneFusion(nn.Module):
     def __init__(self,
                 hr_channels,
                 lr_channels,
@@ -122,14 +90,14 @@ class FreqFusion(nn.Module):
                 compressed_channels=64,        
                 align_corners=False,
                 upsample_mode='nearest',
-                feature_resample=False, # use offset generator or not
+                feature_resample=False,
                 feature_resample_group=4,
-                comp_feat_upsample=True, # use ALPF & AHPF for init upsampling
+                comp_feat_upsample=True,
                 use_high_pass=True,
                 use_low_pass=True,
                 hr_residual=True,
                 semi_conv=True,
-                hamming_window=True, # for regularization, do not matter really
+                hamming_window=True,
                 feature_resample_norm=True,
                 **kwargs):
         super().__init__()
@@ -142,7 +110,7 @@ class FreqFusion(nn.Module):
         self.compressed_channels = compressed_channels
         self.hr_channel_compressor = nn.Conv2d(hr_channels, self.compressed_channels,1)
         self.lr_channel_compressor = nn.Conv2d(lr_channels, self.compressed_channels,1)
-        self.content_encoder = nn.Conv2d( # ALPF generator
+        self.content_encoder = nn.Conv2d(
             self.compressed_channels,
             lowpass_kernel ** 2 * self.up_group * self.scale_factor * self.scale_factor,
             self.encoder_kernel,
@@ -178,6 +146,8 @@ class FreqFusion(nn.Module):
             self.register_buffer('hamming_lowpass', torch.FloatTensor([1.0]))
             self.register_buffer('hamming_highpass', torch.FloatTensor([1.0]))
         self.init_weights()
+        self.intermediate_results = {}
+
 
     def init_weights(self):
         for m in self.modules():
@@ -217,6 +187,15 @@ class FreqFusion(nn.Module):
             return self._forward(hr_feat, lr_feat)
 
     def _forward(self, hr_feat, lr_feat):
+        # <<< 唯一修改的部分：在不影響運算的前提下，儲存特徵 >>>
+        
+        # 每次 forward 開始時清空，避免儲存舊的結果
+        self.intermediate_results.clear()
+        
+        # 1. 儲存原始輸入
+        self.intermediate_results['hr_feat_before'] = hr_feat.clone()
+        self.intermediate_results['lr_feat_before'] = lr_feat.clone()
+
         compressed_hr_feat = self.hr_channel_compressor(hr_feat)
         compressed_lr_feat = self.lr_channel_compressor(lr_feat)
         if self.semi_conv:
@@ -250,6 +229,11 @@ class FreqFusion(nn.Module):
                 mask_hr = self.content_encoder2(compressed_x)
         
         mask_lr = self.kernel_normalizer(mask_lr, self.lowpass_kernel, hamming=self.hamming_lowpass)
+        
+        # 2. 儲存低頻處理後的特徵
+        lr_feat_after = carafe(lr_feat, mask_lr, self.lowpass_kernel, self.up_group, 2)
+        self.intermediate_results['lr_feat_after'] = lr_feat_after.clone()
+        
         if self.semi_conv:
                 lr_feat = carafe(lr_feat, mask_lr, self.lowpass_kernel, self.up_group, 2)
         else:
@@ -263,24 +247,33 @@ class FreqFusion(nn.Module):
         if self.use_high_pass:
             mask_hr = self.kernel_normalizer(mask_hr, self.highpass_kernel, hamming=self.hamming_highpass)
             hr_feat_hf = hr_feat - carafe(hr_feat, mask_hr, self.highpass_kernel, self.up_group, 1)
+            self.intermediate_results['hr_feat_hf_component'] = hr_feat_hf.clone()
             if self.hr_residual:
                 # print('using hr_residual')
                 hr_feat = hr_feat_hf + hr_feat
             else:
                 hr_feat = hr_feat_hf
+            self.intermediate_results['hr_feat_after'] = hr_feat.clone()
+        else:
+            # 如果不處理，也存入對應的值以避免錯誤
+            final_hr_feat = hr_feat
+            self.intermediate_results['hr_feat_hf_component'] = torch.zeros_like(final_hr_feat)
+            self.intermediate_results['hr_feat_after'] = final_hr_feat.clone()
+
 
         if self.feature_resample:
             # print(lr_feat.shape)
             lr_feat = self.dysampler(hr_x=compressed_hr_feat, 
                                      lr_x=compressed_lr_feat, feat2sample=lr_feat)
-                
+            self.intermediate_results['lr_feat_after'] = lr_feat.clone() # 如果有 dysampler，則更新
+
         return  mask_lr, hr_feat, lr_feat
 
 
 
 class LocalSimGuidedSampler(nn.Module):
     """
-    offset generator in FreqFusion
+    offset generator in DesneFusion
     """
     def __init__(self, in_channels, scale=2, style='lp', groups=4, use_direct_scale=True, kernel_size=1, local_window=3, sim_type='cos', norm=True, direction_feat='sim_concat'):
         super().__init__()
@@ -436,6 +429,6 @@ if __name__ == '__main__':
 
     hr_feat = torch.rand(1, 128, 512, 512)
     lr_feat = torch.rand(1, 128, 256, 256)
-    model = FreqFusion(hr_channels=128, lr_channels=128)
+    model = DesneFusion(hr_channels=128, lr_channels=128)
     mask_lr, hr_feat, lr_feat = model(hr_feat=hr_feat, lr_feat=lr_feat)
     print(mask_lr.shape)
