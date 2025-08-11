@@ -121,5 +121,5 @@ bash run_test.sh
 
 &#x25FB; Release other pretrained model
 
-## 📜 License and 
+## 📜 License
 This code repository is release under [MIT License](https://github.com/VanLinLin/NTIRE25_Shadow_Removal?tab=MIT-1-ov-file#readme).
