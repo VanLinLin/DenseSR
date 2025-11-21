@@ -1,5 +1,5 @@
 <h1 align="center">DenseSR: Image Shadow Removal as Dense Prediction (ACMMM 2025)</h1>
-<p align="center">Yu-Fan Lin<sup>1</sup>, Chia-ming Lee<sup>1</sup>, Chih-Chung Hsu<sup>2</sup></p>
+<p align="center">[Yu-Fan Lin](https://vanlinlin.github.io/)<sup>1</sup>, [Chia-ming Lee]((https://ming053l.github.io/))<sup>1</sup>, Chih-Chung Hsu<sup>2</sup></p>
 <p align="center"><sup>1</sup>National Cheng Kung University&nbsp;&nbsp;<sup>2</sup>National Yang Ming Chiao Tung University</p>
 
 <div align="center">
