@@ -6,7 +6,6 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 import math
 from utils import grid_sample
-
 from densefusion import DesneFusion
 
 #########################################
@@ -130,185 +129,250 @@ class ConvProjection(nn.Module):
         flops += self.to_v.flops(H, W)
         return flops
 
-class LinearProjection(nn.Module):
-    def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0., bias=True):
+
+def lambda_init_fn(depth):
+    return 0.8 - 0.6 * math.exp(-0.3 * depth)
+
+class DifferentialLinearProjection(nn.Module):
+    """模態特定的 Differential Linear Projection"""
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0., bias=True):
         super().__init__()
-        inner_dim = dim_head *  heads
+        self.head_dim = dim_head
+        inner_dim = dim_head * heads
         self.heads = heads
-        self.to_q = nn.Linear(dim, inner_dim, bias = bias)
-        self.to_kv = nn.Linear(dim, inner_dim * 2, bias = bias)
+        
+        # Q 投影保持不變
+        self.to_q = nn.Linear(dim, inner_dim, bias=bias)
+        
+        # 分別為兩個模態創建 KV 投影
+        self.to_kv_geometric = nn.Linear(dim, inner_dim * 2, bias=bias)  # 幾何分支的 KV
+        self.to_kv_semantic = nn.Linear(dim, inner_dim * 2, bias=bias)   # 語義分支的 KV
+        
+        # 模態特徵投影層 - 將不同維度特徵投影到統一維度
+        self.geo_proj = nn.Linear(3, dim, bias=bias)  # 假設幾何特徵是3維
+        self.dino_proj = nn.Linear(1024, dim, bias=bias)  # 假設DINO特徵是1024維
+        
+        # 可學習的融合權重
+        self.geo_weight = nn.Parameter(torch.tensor(0.1))
+        self.sem_weight = nn.Parameter(torch.tensor(0.1))
+        
+        self.dim = dim
+        self.inner_dim = inner_dim
+        print("Modal-specific differential transformer initialized!")
+    
+    def forward(self, x, geo_feat, dino_feat, attn_kv=None):
+        B_, N, C = x.shape
+        attn_kv = x if attn_kv is None else attn_kv
+        
+        # Q 保持原樣
+        q = self.to_q(x).reshape(B_, N, 1, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q = q[0]  # [B_, heads, N, head_dim]
+        
+        # 投影模態特徵到統一維度
+        geo_feat_proj = self.geo_proj(geo_feat)  # [B_, N, dim]
+        dino_feat_proj = self.dino_proj(dino_feat)  # [B_, N, dim]
+        
+        # 簡單的特徵融合 - 加權相加
+        geo_enhanced = attn_kv + self.geo_weight * geo_feat_proj
+        semantic_enhanced = attn_kv + self.sem_weight * dino_feat_proj
+        
+        # 分別計算兩組 KV
+        kv_geo = self.to_kv_geometric(geo_enhanced).reshape(B_, N, 2, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        kv_sem = self.to_kv_semantic(semantic_enhanced).reshape(B_, N, 2, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        
+        # 組合成最終的 KV
+        # kv[0] = 幾何增強的 KV, kv[1] = 語義增強的 KV
+        k = torch.stack([kv_geo[0], kv_sem[0]], dim=0)  # [2, B_, heads, N, head_dim]
+        v = torch.stack([kv_geo[1], kv_sem[1]], dim=0)  # [2, B_, heads, N, head_dim]
+        
+        return q, k, v
+
+
+class DifferentialLinearProjection_Concat_kv(nn.Module):
+    """Concat 版本的模態特定 Differential Linear Projection"""
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0., bias=True):
+        super().__init__()
+        self.head_dim = dim_head
+        inner_dim = dim_head * heads
+        self.heads = heads
+        
+        # 基礎 QKV 投影
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=bias)
+        
+        # 兩個模態的額外 KV 投影
+        self.to_kv_geometric = nn.Linear(dim, inner_dim * 2, bias=bias)
+        self.to_kv_semantic = nn.Linear(dim, inner_dim * 2, bias=bias)
+        
+        # 模態特徵投影層
+        self.geo_proj = nn.Linear(3, dim, bias=bias)
+        self.dino_proj = nn.Linear(1024, dim, bias=bias)
+        
+        # 可學習的融合權重
+        self.geo_weight = nn.Parameter(torch.tensor(0.1))
+        self.sem_weight = nn.Parameter(torch.tensor(0.1))
+        
         self.dim = dim
         self.inner_dim = inner_dim
 
-    def forward(self, x, attn_kv=None):
+    def forward(self, x, geo_feat, dino_feat, attn_kv=None):
         B_, N, C = x.shape
         attn_kv = x if attn_kv is None else attn_kv
-        q = self.to_q(x).reshape(B_, N, 1, self.heads, C // self.heads).permute(2, 0, 3, 1, 4).contiguous()
-        kv = self.to_kv(attn_kv).reshape(B_, N, 2, self.heads, C // self.heads).permute(2, 0, 3, 1, 4).contiguous()
-        q = q[0]
-        k, v = kv[0], kv[1] 
-        return q,k,v
+        
+        # 基礎的 QKV
+        qkv_dec = self.to_qkv(x).reshape(B_, N, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k_d, v_d = qkv_dec[0], qkv_dec[1], qkv_dec[2]
+        
+        # 投影模態特徵到統一維度
+        geo_feat_proj = self.geo_proj(geo_feat)
+        dino_feat_proj = self.dino_proj(dino_feat)
+        
+        # 簡單的特徵融合
+        geo_enhanced = attn_kv + self.geo_weight * geo_feat_proj
+        semantic_enhanced = attn_kv + self.sem_weight * dino_feat_proj
+        
+        # 分別計算兩組額外的 KV
+        kv_geo = self.to_kv_geometric(geo_enhanced).reshape(B_, N, 2, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        kv_sem = self.to_kv_semantic(semantic_enhanced).reshape(B_, N, 2, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        
+        k_geo, v_geo = kv_geo[0], kv_geo[1]
+        k_sem, v_sem = kv_sem[0], kv_sem[1]
+        
+        # 拼接：[基礎KV, 幾何KV, 語義KV]
+        k = torch.cat((k_d, k_geo, k_sem), dim=2)
+        v = torch.cat((v_d, v_geo, v_sem), dim=2)
+        
+        return q, k, v
 
-    def flops(self, H, W): 
-        flops = H*W*self.dim*self.inner_dim*3
-        return flops 
-
-class LinearProjection_Concat_kv(nn.Module):
-    def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0., bias=True):
-        super().__init__()
-        inner_dim = dim_head *  heads
-        self.heads = heads
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = bias)
-        self.to_kv = nn.Linear(dim, inner_dim * 2, bias = bias)
-        self.dim = dim
-        self.inner_dim = inner_dim
-
-    def forward(self, x, attn_kv=None):
-        B_, N, C = x.shape
-        attn_kv = x if attn_kv is None else attn_kv
-        qkv_dec = self.to_qkv(x).reshape(B_, N, 3, self.heads, C // self.heads).permute(2, 0, 3, 1, 4).contiguous()
-        kv_enc = self.to_kv(attn_kv).reshape(B_, N, 2, self.heads, C // self.heads).permute(2, 0, 3, 1, 4).contiguous()
-        q, k_d, v_d = qkv_dec[0], qkv_dec[1], qkv_dec[2]  # make torchscript happy (cannot use tensor as tuple)
-        k_e, v_e = kv_enc[0], kv_enc[1] 
-        k = torch.cat((k_d,k_e),dim=2)
-        v = torch.cat((v_d,v_e),dim=2)
-        return q,k,v
-
-    def flops(self, H, W): 
-        flops = H*W*self.dim*self.inner_dim*5
-        return flops 
-
-#########################################
-
-########### SIA #############
-class WindowAttention(nn.Module):
-    def __init__(self, dim, win_size, num_heads, token_projection='linear', qkv_bias=True, qk_scale=None, attn_drop=0.,
-                 proj_drop=0., se_layer=False):
-
+class DifferentialWindowAttention(nn.Module):
+    def __init__(self, dim, win_size, num_heads, depth=1, token_projection='linear', 
+                 qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0., se_layer=False,
+                 geo_dim=3, dino_dim=1024):  # 新增參數
         super().__init__()
         self.dim = dim
-        self.win_size = win_size  # Wh, Ww
+        self.win_size = win_size
         self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
+        self.head_dim = dim // num_heads
+        self.scale = qk_scale or self.head_dim ** -0.5
+        
+        # 預先定義特徵投影層
+        self.geo_dim = geo_dim
+        self.dino_dim = dino_dim
+        self.geo_adaptive_proj = nn.Linear(geo_dim, 3) if geo_dim != 3 else nn.Identity()
+        self.dino_adaptive_proj = nn.Linear(dino_dim, 1024) if dino_dim != 1024 else nn.Identity()
 
-        # define a parameter table of relative position bias
+        # Differential parameters
+        self.lambda_init = lambda_init_fn(depth)
+        self.lambda_q1 = nn.Parameter(torch.ones(1) * 0.5)
+        self.lambda_k1 = nn.Parameter(torch.ones(1) * 0.5)
+        self.lambda_q2 = nn.Parameter(torch.ones(1) * 0.5)
+        self.lambda_k2 = nn.Parameter(torch.ones(1) * 0.5)
+
+        self.subln = nn.LayerNorm(dim)
+
+        # 使用模態特定的投影層
+        if token_projection == 'linear_concat':
+            self.qkv = DifferentialLinearProjection_Concat_kv(dim, num_heads, dim // num_heads, bias=qkv_bias)
+        else:
+            self.qkv = DifferentialLinearProjection(dim, num_heads, dim // num_heads, bias=qkv_bias)
+
+        # 相對位置編碼
         self.relative_position_bias_table = nn.Parameter(
-            torch.zeros((2 * win_size[0] - 1) * (2 * win_size[1] - 1), num_heads))  # 2*Wh-1 * 2*Ww-1, nH
+            torch.zeros((2 * win_size[0] - 1) * (2 * win_size[1] - 1), num_heads))
 
-        # get pair-wise relative position index for each token inside the window
-        coords_h = torch.arange(self.win_size[0])  # [0,...,Wh-1]
-        coords_w = torch.arange(self.win_size[1])  # [0,...,Ww-1]
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
-        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
-        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
-        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
-        relative_coords[:, :, 0] += self.win_size[0] - 1  # shift to start from 0
+        coords_h = torch.arange(self.win_size[0])
+        coords_w = torch.arange(self.win_size[1])
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing='ij'))
+        coords_flatten = torch.flatten(coords, 1)
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+        relative_coords[:, :, 0] += self.win_size[0] - 1
         relative_coords[:, :, 1] += self.win_size[1] - 1
         relative_coords[:, :, 0] *= 2 * self.win_size[1] - 1
-        relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
+        relative_position_index = relative_coords.sum(-1)
         self.register_buffer("relative_position_index", relative_position_index)
-
-        # self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        if token_projection == 'conv':
-            self.qkv = ConvProjection(dim, num_heads, dim // num_heads, bias=qkv_bias)
-        elif token_projection == 'linear_concat':
-            self.qkv = LinearProjection_Concat_kv(dim, num_heads, dim // num_heads, bias=qkv_bias)
-        else:
-            self.qkv = LinearProjection(dim, num_heads, dim // num_heads, bias=qkv_bias)
 
         self.token_projection = token_projection
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
-        self.ll = nn.Identity()
         self.proj_drop = nn.Dropout(proj_drop)
-        self.sigmoid = nn.Sigmoid()
 
-        trunc_normal_(self.relative_position_bias_table, std=.02)
+        nn.init.trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, dino_mat, point_feature, normal, attn_kv=None, mask=None):
         B_, N, C = x.shape
-
-        dino_mat = dino_mat.unsqueeze(2)
-        normalizer = torch.sqrt((dino_mat @ dino_mat.transpose(-2, -1)).squeeze(-2)).detach()
-        normalizer = torch.clamp(normalizer, 1.0e-20, 1.0e10)
-        dino_mat = dino_mat.squeeze(2) / normalizer 
-        dino_mat_correlation_map = dino_mat @ dino_mat.transpose(-2, -1).contiguous()
-        dino_mat_correlation_map = torch.clamp(dino_mat_correlation_map, 0.0, 1.0e10)
-        dino_mat_correlation_map = torch.unsqueeze(dino_mat_correlation_map, dim=1)
-
-        point_feature = point_feature.unsqueeze(2)
-        Point = point_feature.repeat(1, 1, self.win_size[0] * self.win_size[1],1)
-        Point = Point - Point.transpose(-2, -3)
-        normal = normal.unsqueeze(2).repeat(1,1,self.win_size[0] * self.win_size[1],1)
-        # print(f'{Point.shape=}')
-        # print(f'{normal.shape=}')
-        Point = Point * normal
-        Point = torch.abs(torch.sum(Point, dim=3))
-
-        plane_correlation_map = 0.5 * (Point + Point.transpose(-1, -2))
-        plane_correlation_map = plane_correlation_map.unsqueeze(1)
-        plane_correlation_map = torch.exp(-plane_correlation_map)
-
-
-        q, k, v = self.qkv(x, attn_kv)
+        
+        # 準備模態特徵
+        dino_mat = self.dino_adaptive_proj(dino_mat)
+        point_feature = self.geo_adaptive_proj(point_feature)
+        
+        geo_feat = point_feature
+        dino_feat = dino_mat
+        
+        # QKV 投影
+        q, k, v = self.qkv(x, geo_feat, dino_feat, attn_kv)
         q = q * self.scale
-        attn = (q @ k.transpose(-2, -1)) 
-
-        attn = dino_mat_correlation_map * attn
-        attn = plane_correlation_map * attn 
-
-
-        relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-            self.win_size[0] * self.win_size[1], self.win_size[0] * self.win_size[1], -1)  # Wh*Ww,Wh*Ww,nH
-        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-        ratio = attn.size(-1) // relative_position_bias.size(-1)
-        relative_position_bias = repeat(relative_position_bias, 'nH l c -> nH l (c d)', d=ratio)
-
-        attn = attn + relative_position_bias.unsqueeze(0)
-
+        
+        # k, v 格式: [2, B_, heads, N, head_dim]
+        k_geo, k_sem = k[0], k[1]  # 幾何和語義的 K
+        v_geo, v_sem = v[0], v[1]  # 幾何和語義的 V
+        
+        # 所有 heads 都計算兩種注意力
+        attn_geo = torch.matmul(q, k_geo.transpose(-2, -1))  # [B_, heads, N, N]
+        attn_sem = torch.matmul(q, k_sem.transpose(-2, -1))  # [B_, heads, N, N]
+        
+        # 添加相對位置偏置
+        relative_position_bias = self.relative_position_bias_table[
+            self.relative_position_index.view(-1)
+        ].view(self.win_size[0] * self.win_size[1], self.win_size[0] * self.win_size[1], -1)
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
+        
+        ratio = attn_geo.size(-1) // relative_position_bias.size(-1)
+        if ratio > 1:
+            relative_position_bias = repeat(relative_position_bias, 'nH l c -> nH l (c d)', d=ratio)
+        
+        attn_geo = attn_geo + relative_position_bias.unsqueeze(0)
+        attn_sem = attn_sem + relative_position_bias.unsqueeze(0)
+        
+        # 處理 mask
         if mask is not None:
             nW = mask.shape[0]
             mask = repeat(mask, 'nW m n -> nW m (n d)', d=ratio)
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N * ratio) + mask.unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, N, N * ratio)
-            attn = self.softmax(attn)
-        else:
-            attn = self.softmax(attn)
-
-        attn = self.attn_drop(attn)
-        x = (attn @ v).transpose(1, 2).contiguous().reshape(B_, N, C)
+            attn_geo = attn_geo.view(B_ // nW, nW, self.num_heads, N, N * ratio) + mask.unsqueeze(1).unsqueeze(0)
+            attn_sem = attn_sem.view(B_ // nW, nW, self.num_heads, N, N * ratio) + mask.unsqueeze(1).unsqueeze(0)
+            attn_geo = attn_geo.view(-1, self.num_heads, N, N * ratio)
+            attn_sem = attn_sem.view(-1, self.num_heads, N, N * ratio)
+        
+        # Softmax
+        attn_geo = self.softmax(attn_geo)
+        attn_sem = self.softmax(attn_sem)
+        
+        # Differential Attention: 用語義減去幾何
+        lambda_val = torch.sigmoid(self.lambda_q1 * self.lambda_k1) + self.lambda_init
+        attn_diff = attn_sem - lambda_val * attn_geo
+        
+        # 應用注意力
+        attn_geo = self.attn_drop(attn_geo)
+        attn_diff = self.attn_drop(attn_diff)
+        
+        # 兩個分支的輸出
+        x_geo = torch.matmul(attn_geo, v_geo)   # 幾何分支
+        x_diff = torch.matmul(attn_diff, v_sem)  # 差異分支
+        
+        # 加權融合
+        x = x_geo + x_diff  # 或者用可學習權重
+        x = x.transpose(1, 2).contiguous().view(B_, N, C)
+        x = self.subln(x)
+        x = x * (1 - self.lambda_init)
         x = self.proj(x)
-        x = self.ll(x)
         x = self.proj_drop(x)
+        
         return x
 
     def extra_repr(self) -> str:
-        return f'dim={self.dim}, win_size={self.win_size}, num_heads={self.num_heads}'
+        return f'dim={self.dim}, win_size={self.win_size}, num_heads={self.num_heads}, ' \
+               f'head_dim={self.head_dim}, lambda_init={self.lambda_init:.3f}'
 
-    def flops(self, H, W):
-        # calculate flops for 1 window with token length of N
-        # print(N, self.dim)
-        flops = 0
-        N = self.win_size[0] * self.win_size[1]
-        nW = H * W / N
-        # qkv = self.qkv(x)
-        # flops += N * self.dim * 3 * self.dim
-        flops += self.qkv.flops(H, W)
-        # attn = (q @ k.transpose(-2, -1))
-        if self.token_projection != 'linear_concat':
-            flops += nW * self.num_heads * N * (self.dim // self.num_heads) * N
-            #  x = (attn @ v)
-            flops += nW * self.num_heads * N * N * (self.dim // self.num_heads)
-        else:
-            flops += nW * self.num_heads * N * (self.dim // self.num_heads) * N * 2
-            #  x = (attn @ v)
-            flops += nW * self.num_heads * N * N * 2 * (self.dim // self.num_heads)
-        # x = self.proj(x)
-        flops += nW * N * self.dim * self.dim
-        print("W-MSA:{%.2f}" % (flops / 1e9))
-        return flops
 
 
 #########################################
@@ -434,25 +498,6 @@ class Downsample(nn.Module):
         out = self.conv(x).flatten(2).transpose(1,2).contiguous()  # B H*W C
         return out
 
-    # def forward(self, x, img_size=(128,128)):
-    #     B, L, C = x.shape
-    #     H = img_size[0]
-    #     W = img_size[1]
-    #     x = x.transpose(1, 2).contiguous().view(B, C, H, W)
-
-    #     # new add
-    #     x = x.permute(0,2,3,1)
-
-    #     x0 = x[:, 0::2, 0::2, :]
-    #     x1 = x[:, 0::2, 1::2, :]
-    #     x2 = x[:, 1::2, 0::2, :]
-    #     x3 = x[:, 1::2, 1::2, :]
-    #     x = torch.cat([x0, x1, x2, x3], axis=-1)
-    #     x = x.permute(0,3,1,2)
-
-    #     out = self.conv(x).flatten(2).transpose(1,2).contiguous()  # B H*W C
-    #     return out
-
     def flops(self, H, W):
         flops = 0
         # conv
@@ -468,10 +513,6 @@ class Upsample(nn.Module):
             nn.ConvTranspose2d(in_channel, out_channel, kernel_size=2, stride=2)
         )
 
-        # self.conv = nn.Sequential(
-        #     nn.Conv2d(in_channel, out_channel * 4, kernel_size=3, padding=1)
-        # )
-
         self.in_channel = in_channel
         self.out_channel = out_channel
 
@@ -484,19 +525,6 @@ class Upsample(nn.Module):
 
         out = out.flatten(2).transpose(1,2).contiguous() # B H*W C
         return out
-
-    # def forward(self, x, img_size=(128,128)):
-    #     B, L, C = x.shape
-    #     H = img_size[0]
-    #     W = img_size[1]
-    #     x = x.transpose(1, 2).contiguous().view(B, C, H, W)
-    #     out = self.conv(x)
-    #     # new add
-    #     pixel_shuffle = nn.PixelShuffle(2)
-    #     out = pixel_shuffle(out)
-
-    #     out = out.flatten(2).transpose(1,2).contiguous() # B H*W C
-    #     return out
 
     def flops(self, H, W):
         flops = 0
@@ -576,9 +604,65 @@ class OutputProj(nn.Module):
         return flops
 
 
+class SepConv(nn.Module):
+    def __init__(
+        self,
+        in_channel,
+        out_channel,
+        kernel_size,
+        stride=1,
+        bias=True,
+        padding_mode="zeros",
+    ):
+        super().__init__()
+        self.conv1 = nn.Conv2d(
+            in_channel,
+            in_channel,
+            kernel_size,
+            stride=stride,
+            padding=kernel_size // 2,
+            groups=in_channel,
+            bias=bias,
+            padding_mode=padding_mode,
+        )
+        self.conv2 = nn.Conv2d(
+            in_channel, out_channel, kernel_size=1, stride=1, padding=0, bias=bias
+        )
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.conv2(out)
+        return out
+    
+class WaveletEnhanceBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+        ll = torch.tensor([[0.5, 0.5], [0.5, 0.5]])
+        lh = torch.tensor([[-0.5, -0.5], [0.5, 0.5]])
+        hl = torch.tensor([[-0.5, 0.5], [-0.5, 0.5]])
+        hh = torch.tensor([[0.5, -0.5], [-0.5, 0.5]])
+        kernel = torch.stack([ll, lh, hl, hh], dim=0).unsqueeze(1)
+        kernel = kernel.repeat(channels, 1, 1, 1)
+        self.register_buffer("haar_kernel", kernel)
+
+        self.fuse = nn.Conv2d(4 * channels, channels, kernel_size=1, bias=False)
+        self.post = SepConv(channels, channels, kernel_size=3, bias=False)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        dwt = F.conv2d(x, self.haar_kernel, stride=2, groups=C)
+
+        fea = self.fuse(dwt)  # -> [B, C, H//2, W//2]
+        fea = self.post(fea)  # -> [B, C, H//2, W//2]
+
+        out = F.interpolate(fea, size=(H, W), mode="bilinear", align_corners=False)
+
+        return out
+    
 #########################################
 ########### CA Transformer #############
-class CATransformerBlock(nn.Module):
+class CA_DWT_TransformerBlock(nn.Module):
     def __init__(self, dim, input_resolution, num_heads, win_size=10, shift_size=0,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm, token_projection='linear', token_mlp='leff',
@@ -602,8 +686,8 @@ class CATransformerBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer,
                        drop=drop) if token_mlp == 'ffn' else LeFF(dim, mlp_hidden_dim, act_layer=act_layer, drop=drop)
-        self.CAB = CAB(dim, kernel_size=3, reduction=4, bias=False, act=nn.PReLU())
-
+        self.CAB = CAB(dim//2, kernel_size=3, reduction=4, bias=False, act=nn.PReLU())
+        self.DWT= WaveletEnhanceBlock(dim//2)
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
@@ -623,7 +707,13 @@ class CATransformerBlock(nn.Module):
         x = rearrange(x, ' b (h w) (c) -> b c h w ', h=H, w=W)
         # bs,hidden_dim,32x32
 
-        x = self.CAB(x)
+        x1, x2 = torch.chunk(x, 2, dim=1)
+
+        x1 = self.CAB(x1)
+        x2 = self.DWT(x2)
+
+        
+        x = torch.cat([x1, x2], dim=1)
 
         # flaten
         x = rearrange(x, ' b c h w -> b (h w) c', h=H, w=W)
@@ -649,9 +739,14 @@ class CATransformerBlock(nn.Module):
         print("LeWin:{%.2f}" % (flops / 1e9))
         return flops
 
+
+
 #########################################
 ########### SIM Transformer #############
-class SIMTransformerBlock(nn.Module):
+
+#########################################
+########### SIM Transformer #############
+class CA_DWT_SIMTransformerBlock(nn.Module):
     def __init__(self, dim, input_resolution, num_heads, win_size=10, shift_size=0,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm,token_projection='linear',token_mlp='leff',se_layer=False):
@@ -669,7 +764,7 @@ class SIMTransformerBlock(nn.Module):
         assert 0 <= self.shift_size < self.win_size, "shift_size must in 0-win_size"
 
         self.norm1 = norm_layer(dim)
-        self.attn = WindowAttention(
+        self.attn = DifferentialWindowAttention(
             dim, win_size=to_2tuple(self.win_size), num_heads=num_heads,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
             token_projection=token_projection,se_layer=se_layer)
@@ -678,8 +773,10 @@ class SIMTransformerBlock(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim,act_layer=act_layer, drop=drop) if token_mlp=='ffn' else LeFF(dim,mlp_hidden_dim,act_layer=act_layer, drop=drop)
-        self.CAB = CAB(dim, kernel_size=3, reduction=4, bias=False, act=nn.PReLU())
+        #self.CAB = CAB(dim, kernel_size=3, reduction=4, bias=False, act=nn.PReLU())
 
+        self.CAB = CAB(dim//2, kernel_size=3, reduction=4, bias=False, act=nn.PReLU())
+        self.DWT= WaveletEnhanceBlock(dim//2)
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
@@ -780,7 +877,14 @@ class SIMTransformerBlock(nn.Module):
         x = rearrange(x, ' b (h w) (c) -> b c h w ', h=H, w=W)
         # bs,hidden_dim,32x32
 
-        x = self.CAB(x)
+        x1, x2 = torch.chunk(x, 2, dim=1)
+
+        x1 = self.CAB(x1)
+        x2 = self.DWT(x2)
+
+        
+        x = torch.cat([x1, x2], dim=1)
+
 
         x = rearrange(x, ' b c h w -> b (h w) c', h=H, w=W)
 
@@ -821,7 +925,7 @@ class BasicShadowFormer(nn.Module):
         # build blocks
         if cab:
             self.blocks = nn.ModuleList([
-                CATransformerBlock(dim=dim, input_resolution=input_resolution,
+                CA_DWT_TransformerBlock(dim=dim, input_resolution=input_resolution,
                                       num_heads=num_heads, win_size=win_size,
                                       shift_size=0 if (i % 2 == 0) else win_size // 2,
                                       mlp_ratio=mlp_ratio,
@@ -833,7 +937,7 @@ class BasicShadowFormer(nn.Module):
                 for i in range(depth)])
         else:
             self.blocks = nn.ModuleList([
-                SIMTransformerBlock(dim=dim, input_resolution=input_resolution,
+                CA_DWT_SIMTransformerBlock(dim=dim, input_resolution=input_resolution,
                                      num_heads=num_heads, win_size=win_size,
                                      shift_size=0 if (i % 2 == 0) else win_size // 2,
                                      mlp_ratio=mlp_ratio,
@@ -860,267 +964,41 @@ class BasicShadowFormer(nn.Module):
             flops += blk.flops()
         return flops
 
-class ShadowFormer(nn.Module):
+class GrayWorldRetinex(nn.Module):
+    def __init__(self, eps=1e-6):
+        super(GrayWorldRetinex, self).__init__()
+        self.eps = eps
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        mean = x.mean(dim=(2, 3), keepdim=True)  # [B, C, 1, 1]
+        gray_mean = mean.mean(dim=1, keepdim=True)  # [B, 1, 1, 1]
+        gain = gray_mean / (mean + self.eps)
+        x = x * gain  # white balance
+        x_log = torch.log(x + self.eps)
+        x_log = x_log - x_log.mean(dim=(2, 3), keepdim=True)
+        x_out = torch.exp(x_log)
+        x_min = x_out.amin(dim=(-2, -1), keepdim=True)
+        x_max = x_out.amax(dim=(-2, -1), keepdim=True)
+        x_out = (x_out - x_min) / (x_max - x_min + self.eps)
+        return x_out
+
+
+
+def _rgb2luma_tensor(x):
+    """x: [B,3,H,W]"""
+    return 0.2126*x[:,0:1,:,:] + 0.7152*x[:,1:2,:,:] + 0.0722*x[:,2:3,:,:]
+    
+class PhaSR(nn.Module):
     def __init__(self, img_size=256, in_chans=3,
-                embed_dim=32, depths=[2, 2, 2, 2, 2, 2, 2, 2, 2], num_heads=[1, 2, 4, 8, 16, 16, 8, 4, 2],
-                win_size=8, mlp_ratio=4., qkv_bias=True, qk_scale=None,
-                drop_path_rate=0., norm_layer=nn.LayerNorm, patch_norm=True,
-                use_checkpoint=False, token_projection='linear', token_mlp='leff', se_layer=True,
-                dowsample=Downsample, upsample=Upsample, dino_dim=1024, **kwargs):
-        super().__init__()
-
-        self.num_enc_layers = len(depths)//2
-        self.num_dec_layers = len(depths)//2
-        self.embed_dim = embed_dim
-        self.patch_norm = patch_norm
-        self.mlp_ratio = mlp_ratio
-        self.token_projection = token_projection
-        self.mlp = token_mlp
-        self.win_size =win_size
-        self.reso = img_size
-        self.pos_drop = nn.Dropout(p=drop_rate)
-        self.DINO_channel = dino_dim
-
-        # stochastic depth
-        enc_dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths[:self.num_enc_layers]))]
-        conv_dpr = [drop_path_rate]*depths[4]
-        dec_dpr = enc_dpr[::-1]
-
-        # build layers
-
-        # Input/Output
-        self.input_proj = InputProj(in_channel=4, out_channel=embed_dim, kernel_size=3, stride=1, act_layer=nn.LeakyReLU)
-        self.output_proj = OutputProj(in_channel=2*embed_dim, out_channel=in_chans, kernel_size=3, stride=1)
-
-        # Encoder
-        self.encoderlayer_0 = BasicShadowFormer(dim=embed_dim,
-                            output_dim=embed_dim,
-                            input_resolution=(img_size,
-                                                img_size),
-                            depth=depths[0],
-                            num_heads=num_heads[0],
-                            win_size=win_size,
-                            mlp_ratio=self.mlp_ratio,
-                            qkv_bias=qkv_bias, qk_scale=qk_scale,
-                            drop=drop_rate, attn_drop=attn_drop_rate,
-                            drop_path=enc_dpr[sum(depths[:0]):sum(depths[:1])],
-                            norm_layer=norm_layer,
-                            use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer,cab=True)
-        self.dowsample_0 = dowsample(embed_dim, embed_dim*2)
-        self.encoderlayer_1 = BasicShadowFormer(dim=embed_dim*2,
-                            output_dim=embed_dim*2,
-                            input_resolution=(img_size // 2,
-                                                img_size // 2),
-                            depth=depths[1],
-                            num_heads=num_heads[1],
-                            win_size=win_size,
-                            mlp_ratio=self.mlp_ratio,
-                            qkv_bias=qkv_bias, qk_scale=qk_scale,
-                            drop=drop_rate, attn_drop=attn_drop_rate,
-                            drop_path=enc_dpr[sum(depths[:1]):sum(depths[:2])],
-                            norm_layer=norm_layer,
-                            use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer, cab=True)
-        self.dowsample_1 = dowsample(embed_dim*2, embed_dim*4)
-        self.encoderlayer_2 = BasicShadowFormer(dim=embed_dim*4,
-                            output_dim=embed_dim*4,
-                            input_resolution=(img_size // (2 ** 2),
-                                                img_size // (2 ** 2)),
-                            depth=depths[2],
-                            num_heads=num_heads[2],
-                            win_size=win_size,
-                            mlp_ratio=self.mlp_ratio,
-                            qkv_bias=qkv_bias, qk_scale=qk_scale,
-                            drop=drop_rate, attn_drop=attn_drop_rate,
-                            drop_path=enc_dpr[sum(depths[:2]):sum(depths[:3])],
-                            norm_layer=norm_layer,
-                            use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
-        self.dowsample_2 = dowsample(embed_dim*4, embed_dim*8)
-
-        # Bottleneck
-        channel_conv = embed_dim*16 
-        # channel_conv = embed_dim*8 if self.add_shadow_detect_dino_conact else embed_dim*4
-        self.conv = BasicShadowFormer(dim=channel_conv,
-                            output_dim=channel_conv,
-                            input_resolution=(img_size // (2 ** 3),
-                                                img_size // (2 ** 3)),
-                            depth=depths[4],
-                            num_heads=num_heads[4],
-                            win_size=win_size,
-                            mlp_ratio=self.mlp_ratio,
-                            qkv_bias=qkv_bias, qk_scale=qk_scale,
-                            drop=drop_rate, attn_drop=attn_drop_rate,
-                            drop_path=conv_dpr,
-                            norm_layer=norm_layer,
-                            use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
-
-        # # Decoder
-        self.upsample_0 = upsample(channel_conv, embed_dim*4)
-        channel_0 =  embed_dim*8
-        self.decoderlayer_0 = BasicShadowFormer(dim=channel_0,
-                            output_dim=channel_0,
-                            input_resolution=(img_size // (2 ** 2),
-                                                img_size // (2 ** 2)),
-                            depth=depths[6],
-                            num_heads=num_heads[6],
-                            win_size=win_size,
-                            mlp_ratio=self.mlp_ratio,
-                            qkv_bias=qkv_bias, qk_scale=qk_scale,
-                            drop=drop_rate, attn_drop=attn_drop_rate,
-                            drop_path=dec_dpr[sum(depths[5:6]):sum(depths[5:7])],
-                            norm_layer=norm_layer,
-                            use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
-        self.upsample_1 = upsample(channel_0, embed_dim*2)
-        channel_1 =  embed_dim*4
-        self.decoderlayer_1 = BasicShadowFormer(dim=channel_1,
-                            output_dim=channel_1,
-                            input_resolution=(img_size // 2,
-                                                img_size // 2),
-                            depth=depths[7],
-                            num_heads=num_heads[7],
-                            win_size=win_size,
-                            mlp_ratio=self.mlp_ratio,
-                            qkv_bias=qkv_bias, qk_scale=qk_scale,
-                            drop=drop_rate, attn_drop=attn_drop_rate,
-                            drop_path=dec_dpr[sum(depths[5:7]):sum(depths[5:8])],
-                            norm_layer=norm_layer,
-                            use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer, cab=True)
-        self.upsample_2 = upsample(channel_1, embed_dim)
-        self.decoderlayer_2 = BasicShadowFormer(dim=embed_dim*2,
-                            output_dim=embed_dim*2,
-                            input_resolution=(img_size,
-                                                img_size),
-                            depth=depths[8],
-                            num_heads=num_heads[8],
-                            win_size=win_size,
-                            mlp_ratio=self.mlp_ratio,
-                            qkv_bias=qkv_bias, qk_scale=qk_scale,
-                            drop=drop_rate, attn_drop=attn_drop_rate,
-                            drop_path=dec_dpr[sum(depths[5:8]):sum(depths[5:9])],
-                            norm_layer=norm_layer,
-                            use_checkpoint=use_checkpoint,
-                            token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer,cab=True)
-
-        self.Conv = nn.Conv2d(self.DINO_channel * 4, embed_dim * 8, kernel_size=1)
-        self.relu = nn.LeakyReLU()
-        self.apply(self._init_weights)
-        
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        return {'absolute_pos_embed'}
-
-    @torch.jit.ignore
-    def no_weight_decay_keywords(self):
-        return {'relative_position_bias_table'}
-
-    def extra_repr(self) -> str:
-        return f"embed_dim={self.embed_dim}, token_projection={self.token_projection}, token_mlp={self.mlp}, win_size={self.win_size}"
-
-    def forward(self, x, DINO_Mat_features=None, point=None, normal=None, mask=None):
-        point_feature=None
-        dino_mat =None
-        dino_mat1=None
-
-        self.img_size = torch.tensor((x.shape[2], x.shape[3]))
-        point_feature1 = grid_sample(point, self.img_size // 2)
-        point_feature2 = grid_sample(point, self.img_size // 4)
-        point_feature3 = grid_sample(point, self.img_size // 8)
-        normal1= grid_sample(normal, self.img_size // 2)
-        normal2= grid_sample(normal, self.img_size // 4)
-        normal3= grid_sample(normal, self.img_size // 8)
-
-        patch_features_0 = DINO_Mat_features[0]
-        patch_features_1 = DINO_Mat_features[1]
-        patch_features_2 = DINO_Mat_features[2]
-        patch_features_3 = DINO_Mat_features[3]
-        patch_feature_all = torch.cat((patch_features_0, patch_features_1,
-                                    patch_features_2, patch_features_3), dim=1)
-
-        # Get concatenate DINO Feature
-        dino_mat_cat = self.Conv(patch_feature_all)
-        dino_mat_cat = self.relu(dino_mat_cat)
-        B, C, W, H = dino_mat_cat.shape
-        dino_mat_cat_flat = dino_mat_cat.view(B, C, W * H).permute(0,2,1)
-
-
-        dino_mat2 = F.upsample_bilinear(DINO_Mat_features[-1], scale_factor=2)
-        dino_mat3 = DINO_Mat_features[-1]
-            
-        # RGBD
-        xi = torch.cat((x, point[:,2,:].unsqueeze(1)), dim=1)
-
-        y = self.input_proj(xi)
-        y = self.pos_drop(y)
-
-        # Encoder
-        self.img_size = (int(self.img_size[0]), int(self.img_size[1]))
-        conv0 = self.encoderlayer_0(y, dino_mat, point_feature, normal, mask, img_size = self.img_size)
-        pool0 = self.dowsample_0(conv0, img_size = self.img_size)
-
-        self.img_size = (int(self.img_size[0]/2), int(self.img_size[1]/2))
-        conv1 = self.encoderlayer_1(pool0, dino_mat1, point_feature1, normal1, img_size = self.img_size)
-        pool1 = self.dowsample_1(conv1, img_size = self.img_size)
-
-        self.img_size = (int(self.img_size[0] / 2), int(self.img_size[1] / 2))
-        conv2 = self.encoderlayer_2(pool1, dino_mat2, point_feature2, normal2, img_size = self.img_size)
-        pool2 = self.dowsample_2(conv2, img_size = self.img_size)
-
-        # Bottleneck
-        self.img_size = (int(self.img_size[0] / 2), int(self.img_size[1] / 2))
-        pool2 = torch.cat([pool2, dino_mat_cat_flat],-1)
-        conv3 = self.conv(pool2, dino_mat3, point_feature3, normal3, img_size = self.img_size)
-        print(f'{conv3.shape=}')
-
-        #Decoder
-        up0 = self.upsample_0(conv3, img_size = self.img_size)
-        self.img_size = (int(self.img_size[0] * 2), int(self.img_size[1] * 2))
-        print(f'{conv2.shape=}, {up0.shape=}')  # conv2.shape=torch.Size([1, 4096, 128]), up0.shape=torch.Size([1, 4096, 128])
-        deconv0 = torch.cat([up0,conv2],-1)   
-        deconv0 = self.decoderlayer_0(deconv0, dino_mat2, point_feature2, normal2, img_size = self.img_size)
-        print(f'{deconv0.shape=}')
-
-        up1 = self.upsample_1(deconv0, img_size = self.img_size)
-        self.img_size = (int(self.img_size[0] * 2), int(self.img_size[1] * 2))
-        print(f'{conv1.shape=}, {up1.shape=}')  # conv1.shape=torch.Size([1, 16384, 64]), up1.shape=torch.Size([1, 16384, 64])
-        deconv1 = torch.cat([up1,conv1],-1)
-        deconv1 = self.decoderlayer_1(deconv1, dino_mat1, point_feature1, normal1, img_size = self.img_size)
-        print(f'{deconv1.shape=}')
-
-        up2 = self.upsample_2(deconv1, img_size = self.img_size)
-        self.img_size = (int(self.img_size[0] * 2), int(self.img_size[1] * 2))
-        print(f'{conv0.shape=}, {up2.shape=}')  # conv0.shape=torch.Size([1, 65536, 32]), up2.shape=torch.Size([1, 65536, 32])
-        deconv2 = torch.cat([up2,conv0],-1)
-        deconv2 = self.decoderlayer_2(deconv2, dino_mat, point_feature, normal, mask, img_size = self.img_size)
-
-        # Output Projection
-        y = self.output_proj(deconv2, img_size = self.img_size) + x
-        return y
-
-
-
-class DenseSR(nn.Module):
-    def __init__(self, img_size=256, in_chans=3,
-                embed_dim=32, depths=[2, 2, 2, 2, 2, 2, 2, 2, 2], num_heads=[1, 2, 4, 8, 16, 16, 8, 4, 2],
+                embed_dim=32, depths=[2, 2, 2, 2, 2, 2, 2, 2, 2], 
+                num_heads=[1, 2, 4, 8, 16, 16, 8, 4, 2],
                 win_size=8, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                 norm_layer=nn.LayerNorm, patch_norm=True,
-                use_checkpoint=False, token_projection='linear', token_mlp='leff', se_layer=True,
-                dowsample=Downsample, upsample=Upsample, dino_dim=1024, **kwargs):
+                use_checkpoint=False, token_projection='linear', token_mlp='leff', 
+                se_layer=True, dowsample=Downsample, upsample=Upsample, 
+                use_white_balance=True, use_axs=True, **kwargs):
         super().__init__()
 
         self.num_enc_layers = len(depths)//2
@@ -1130,17 +1008,33 @@ class DenseSR(nn.Module):
         self.mlp_ratio = mlp_ratio
         self.token_projection = token_projection
         self.mlp = token_mlp
-        self.win_size =win_size
+        self.win_size = win_size
         self.reso = img_size
         self.pos_drop = nn.Dropout(p=drop_rate)
-        self.DINO_channel = dino_dim
+        self.DINO_channel = 1024
 
         # stochastic depth
         enc_dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths[:self.num_enc_layers]))]
         conv_dpr = [drop_path_rate]*depths[4]
         dec_dpr = enc_dpr[::-1]
 
-        # build layers
+        # 為每個尺度創建 DINO 特徵融合模塊
+        self.dino_proj_0 = nn.Conv2d(1024, embed_dim, kernel_size=1)
+        self.dino_proj_1 = nn.Conv2d(1024, embed_dim*2, kernel_size=1)
+        self.dino_proj_2 = nn.Conv2d(1024, embed_dim*4, kernel_size=1)
+        self.dino_proj_3 = nn.Conv2d(1024, embed_dim*8, kernel_size=1)
+        
+        # 可學習的融合權重（可選）
+        self.alpha_0 = nn.Parameter(torch.tensor(0.1))
+        self.alpha_1 = nn.Parameter(torch.tensor(0.1))
+        self.alpha_2 = nn.Parameter(torch.tensor(0.1))
+        self.alpha_3 = nn.Parameter(torch.tensor(0.1))
+
+        # 多尺度特徵融合權重
+        self.fusion_weight_0 = nn.Parameter(torch.tensor(0.1))
+        self.fusion_weight_1 = nn.Parameter(torch.tensor(0.1))
+        self.fusion_weight_2 = nn.Parameter(torch.tensor(0.1))
+        self.fusion_weight_3 = nn.Parameter(torch.tensor(0.1))
 
         # Input/Output
         self.input_proj = InputProj(in_channel=4, out_channel=embed_dim, kernel_size=3, stride=1, act_layer=nn.LeakyReLU)
@@ -1149,8 +1043,7 @@ class DenseSR(nn.Module):
         # Encoder
         self.encoderlayer_0 = BasicShadowFormer(dim=embed_dim,
                             output_dim=embed_dim,
-                            input_resolution=(img_size,
-                                                img_size),
+                            input_resolution=(img_size, img_size),
                             depth=depths[0],
                             num_heads=num_heads[0],
                             win_size=win_size,
@@ -1162,10 +1055,10 @@ class DenseSR(nn.Module):
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer,cab=True)
         self.dowsample_0 = dowsample(embed_dim, embed_dim*2)
+        
         self.encoderlayer_1 = BasicShadowFormer(dim=embed_dim*2,
                             output_dim=embed_dim*2,
-                            input_resolution=(img_size // 2,
-                                                img_size // 2),
+                            input_resolution=(img_size // 2, img_size // 2),
                             depth=depths[1],
                             num_heads=num_heads[1],
                             win_size=win_size,
@@ -1177,10 +1070,10 @@ class DenseSR(nn.Module):
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer, cab=True)
         self.dowsample_1 = dowsample(embed_dim*2, embed_dim*4)
+        
         self.encoderlayer_2 = BasicShadowFormer(dim=embed_dim*4,
                             output_dim=embed_dim*4,
-                            input_resolution=(img_size // (2 ** 2),
-                                                img_size // (2 ** 2)),
+                            input_resolution=(img_size // (2 ** 2), img_size // (2 ** 2)),
                             depth=depths[2],
                             num_heads=num_heads[2],
                             win_size=win_size,
@@ -1194,12 +1087,10 @@ class DenseSR(nn.Module):
         self.dowsample_2 = dowsample(embed_dim*4, embed_dim*8)
 
         # Bottleneck
-        channel_conv = embed_dim*16 
-        # channel_conv = embed_dim*8 if self.add_shadow_detect_dino_conact else embed_dim*4
+        channel_conv = embed_dim*16
         self.conv = BasicShadowFormer(dim=channel_conv,
                             output_dim=channel_conv,
-                            input_resolution=(img_size // (2 ** 3),
-                                                img_size // (2 ** 3)),
+                            input_resolution=(img_size // (2 ** 3), img_size // (2 ** 3)),
                             depth=depths[4],
                             num_heads=num_heads[4],
                             win_size=win_size,
@@ -1211,13 +1102,12 @@ class DenseSR(nn.Module):
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
 
-        # # Decoder
+        # Decoder
         self.upsample_0 = upsample(channel_conv, embed_dim*4)
-        channel_0 =  embed_dim*8
+        channel_0 = embed_dim*8
         self.decoderlayer_0 = BasicShadowFormer(dim=channel_0,
                             output_dim=channel_0,
-                            input_resolution=(img_size // (2 ** 2),
-                                                img_size // (2 ** 2)),
+                            input_resolution=(img_size // (2 ** 2), img_size // (2 ** 2)),
                             depth=depths[6],
                             num_heads=num_heads[6],
                             win_size=win_size,
@@ -1229,11 +1119,11 @@ class DenseSR(nn.Module):
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer)
         self.upsample_1 = upsample(channel_0, embed_dim*2)
-        channel_1 =  embed_dim*4
+        
+        channel_1 = embed_dim*4
         self.decoderlayer_1 = BasicShadowFormer(dim=channel_1,
                             output_dim=channel_1,
-                            input_resolution=(img_size // 2,
-                                                img_size // 2),
+                            input_resolution=(img_size // 2, img_size // 2),
                             depth=depths[7],
                             num_heads=num_heads[7],
                             win_size=win_size,
@@ -1245,10 +1135,10 @@ class DenseSR(nn.Module):
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,token_mlp=token_mlp,se_layer=se_layer, cab=True)
         self.upsample_2 = upsample(channel_1, embed_dim)
+        
         self.decoderlayer_2 = BasicShadowFormer(dim=embed_dim*2,
                             output_dim=embed_dim*2,
-                            input_resolution=(img_size,
-                                                img_size),
+                            input_resolution=(img_size, img_size),
                             depth=depths[8],
                             num_heads=num_heads[8],
                             win_size=win_size,
@@ -1262,7 +1152,16 @@ class DenseSR(nn.Module):
 
         self.Conv = nn.Conv2d(self.DINO_channel * 4, embed_dim * 8, kernel_size=1)
         self.relu = nn.LeakyReLU()
-        self.apply(self._init_weights)
+        
+
+        self.use_axs = use_axs
+        if use_white_balance:
+            self.wb = GrayWorldRetinex()
+            self.use_white_balance = True
+            if self.use_axs == False:
+                self.wb_alpha = nn.Parameter(torch.zeros(1, 3, 1, 1), requires_grad=True)
+        else:
+            self.use_white_balance = False
 
         self.densefusion1 = DesneFusion(hr_channels=256,
                                       lr_channels=512)
@@ -1271,7 +1170,10 @@ class DenseSR(nn.Module):
                                       lr_channels=256)     
            
         self.densefusion3 = DesneFusion(hr_channels=64,
-                                      lr_channels=128)  
+                                      lr_channels=128) 
+
+            
+        self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -1282,136 +1184,154 @@ class DenseSR(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        return {'absolute_pos_embed'}
-
-    @torch.jit.ignore
-    def no_weight_decay_keywords(self):
-        return {'relative_position_bias_table'}
-
-    def extra_repr(self) -> str:
-        return f"embed_dim={self.embed_dim}, token_projection={self.token_projection}, token_mlp={self.mlp}, win_size={self.win_size}"
-
     def forward(self, x, DINO_Mat_features=None, point=None, normal=None, mask=None):
-        point_feature=None
-        dino_mat =None
-        dino_mat1=None
-
         self.img_size = torch.tensor((x.shape[2], x.shape[3]))
+        
+        # 準備幾何特徵
         point_feature1 = grid_sample(point, self.img_size // 2)
         point_feature2 = grid_sample(point, self.img_size // 4)
         point_feature3 = grid_sample(point, self.img_size // 8)
-        normal1= grid_sample(normal, self.img_size // 2)
-        normal2= grid_sample(normal, self.img_size // 4)
-        normal3= grid_sample(normal, self.img_size // 8)
+        normal1 = grid_sample(normal, self.img_size // 2)
+        normal2 = grid_sample(normal, self.img_size // 4)
+        normal3 = grid_sample(normal, self.img_size // 8)
 
-        patch_features_0 = DINO_Mat_features[0]
-        patch_features_1 = DINO_Mat_features[1]
-        patch_features_2 = DINO_Mat_features[2]
-        patch_features_3 = DINO_Mat_features[3]
-        patch_feature_all = torch.cat((patch_features_0, patch_features_1,
-                                    patch_features_2, patch_features_3), dim=1)
-
-        # Get concatenate DINO Feature
+        # 上採樣並投影 DINO 特徵
+        H0, W0 = int(self.img_size[0]), int(self.img_size[1])
+        H1, W1 = H0 // 2, W0 // 2
+        H2, W2 = H0 // 4, W0 // 4
+        H3, W3 = H0 // 8, W0 // 8
+        
+        dino_0 = self.dino_proj_0(F.interpolate(DINO_Mat_features[0], size=(H0, W0), mode='bilinear', align_corners=False))
+        dino_1 = self.dino_proj_1(F.interpolate(DINO_Mat_features[1], size=(H1, W1), mode='bilinear', align_corners=False))
+        dino_2 = self.dino_proj_2(F.interpolate(DINO_Mat_features[2], size=(H2, W2), mode='bilinear', align_corners=False))
+        dino_3 = self.dino_proj_3(F.interpolate(DINO_Mat_features[3], size=(H3, W3), mode='bilinear', align_corners=False))
+        
+        # 轉為 sequence
+        dino_0_flat = dino_0.flatten(2).transpose(1, 2)
+        dino_1_flat = dino_1.flatten(2).transpose(1, 2)
+        dino_2_flat = dino_2.flatten(2).transpose(1, 2)
+        dino_3_flat = dino_3.flatten(2).transpose(1, 2)
+        
+        # Bottleneck 的拼接特徵
+        patch_feature_all = torch.cat((DINO_Mat_features[0], DINO_Mat_features[1],
+                                        DINO_Mat_features[2], DINO_Mat_features[3]), dim=1)
         dino_mat_cat = self.Conv(patch_feature_all)
         dino_mat_cat = self.relu(dino_mat_cat)
-        B, C, W, H = dino_mat_cat.shape
-        dino_mat_cat_flat = dino_mat_cat.view(B, C, W * H).permute(0,2,1)
+        dino_mat_cat_flat = dino_mat_cat.flatten(2).transpose(1, 2)
 
-
-        dino_mat2 = F.interpolate(DINO_Mat_features[-1], scale_factor=2)
+        # 原始 attention 用的 DINO
+        dino_mat = None
+        dino_mat1 = None
+        dino_mat2 = F.interpolate(DINO_Mat_features[-1], scale_factor=2, mode='bilinear', align_corners=False)
         dino_mat3 = DINO_Mat_features[-1]
-            
-        # RGBD
-        xi = torch.cat((x, point[:,2,:].unsqueeze(1)), dim=1)
 
+        # White balance
+        if self.use_white_balance:
+            A = self.wb(x)
+            if self.use_axs:
+                Y_I = _rgb2luma_tensor(x)
+                Y_A = _rgb2luma_tensor(A)
+                S = torch.clamp(Y_I / (Y_A + 1e-6), 0.5, 2.0)
+                x_corrected = torch.clamp(A * S, 0, 1)
+            else:
+                alpha = torch.sigmoid(self.wb_alpha)
+                x_corrected = alpha * A + (1 - alpha) * x
+        else:
+            x_corrected = x
+            
+            
+        # RGBD input
+        xi = torch.cat((x_corrected, point[:,2,:].unsqueeze(1)), dim=1)
         y = self.input_proj(xi)
         y = self.pos_drop(y)
 
-        # Encoder
-        self.img_size = (int(self.img_size[0]), int(self.img_size[1]))
-        conv0 = self.encoderlayer_0(y, dino_mat, point_feature, normal, mask, img_size = self.img_size)
-        pool0 = self.dowsample_0(conv0, img_size = self.img_size)
+        # Encoder - 直接相加融合
+        self.img_size = (H0, W0)
+        conv0 = self.encoderlayer_0(y + self.alpha_0 * dino_0_flat, dino_mat, point, normal, mask, img_size=self.img_size)
+        pool0 = self.dowsample_0(conv0, img_size=self.img_size)
 
-        self.img_size = (int(self.img_size[0]/2), int(self.img_size[1]/2))
-        conv1 = self.encoderlayer_1(pool0, dino_mat1, point_feature1, normal1, img_size = self.img_size)
-        pool1 = self.dowsample_1(conv1, img_size = self.img_size)
+        self.img_size = (H1, W1)
+        conv1 = self.encoderlayer_1(pool0 + self.alpha_1 * dino_1_flat, dino_mat1, point_feature1, normal1, img_size=self.img_size)
+        pool1 = self.dowsample_1(conv1, img_size=self.img_size)
 
-        self.img_size = (int(self.img_size[0] / 2), int(self.img_size[1] / 2))
-        conv2 = self.encoderlayer_2(pool1, dino_mat2, point_feature2, normal2, img_size = self.img_size)
-        pool2 = self.dowsample_2(conv2, img_size = self.img_size)
+        self.img_size = (H2, W2)
+        conv2 = self.encoderlayer_2(pool1 + self.alpha_2 * dino_2_flat, dino_mat2, point_feature2, normal2, img_size=self.img_size)
+        pool2 = self.dowsample_2(conv2, img_size=self.img_size)
 
         # Bottleneck
-        self.img_size = (int(self.img_size[0] / 2), int(self.img_size[1] / 2))
-        pool2 = torch.cat([pool2, dino_mat_cat_flat],-1)
-        conv3 = self.conv(pool2, dino_mat3, point_feature3, normal3, img_size = self.img_size)
-        # print(f'{conv3.shape=}')  # conv3.shape=torch.Size([1, 1024, 512]) 1, 32, 32, 512
-        # conv3_B_C_H_W = conv3.view(conv3.shape[0], 32, 32, 512).permute(0, 3, 1, 2)
-        conv3_B_C_H_W = conv3.view(conv3.shape[0], int(conv3.shape[1]**0.5), int(conv3.shape[1]**0.5), 512).permute(0, 3, 1, 2)
-        # print(f'{conv3_B_C_H_W.shape=}')  # 1, 512, 32, 32
+        self.img_size = (H3, W3)
+        pool2_fused = pool2 + self.alpha_3 * dino_3_flat
+        pool2_cat = torch.cat([pool2_fused, dino_mat_cat_flat], -1)
+        conv3 = self.conv(pool2_cat, dino_mat3, point_feature3, normal3, img_size=self.img_size)
 
-        #Decoder
-        up0 = self.upsample_0(conv3, img_size = self.img_size)
-        self.img_size = (int(self.img_size[0] * 2), int(self.img_size[1] * 2))
-        # print(f'1.{conv2.shape=}, {up0.shape=}')  # conv2.shape=torch.Size([1, 4096, 128]), up0.shape=torch.Size([1, 4096, 128])
-        deconv0 = torch.cat([up0,conv2],-1)   
-        deconv0 = self.decoderlayer_0(deconv0, dino_mat2, point_feature2, normal2, img_size = self.img_size)
-        # print(f'1.{deconv0.shape=}')  # deconv0.shape=torch.Size([1, 4096, 256]) 1, 64, 64, 256
-        deconv0_B_C_H_W = deconv0.view(deconv0.shape[0], int(deconv0.shape[1]**0.5), int(deconv0.shape[1]**0.5), 256).permute(0, 3, 1, 2)
-        # print(f'1.{deconv0_B_C_H_W.shape=}')  # 1, 256, 64, 64
+        conv3_B_C_H_W = conv3.view(conv3.shape[0], H3, W3, -1).permute(0, 3, 1, 2)
 
-        _, deconv0_B_C_H_W, lr_feat = self.densefusion1(hr_feat=deconv0_B_C_H_W, lr_feat=conv3_B_C_H_W)  # 1, 256, 64, 64 & 1, 512, 32, 32
-        # print(f'1.{deconv0.shape=}, {lr_feat.shape=}')  # deconv0.shape=torch.Size([1, 256, 64, 64]), lr_feat.shape=torch.Size([1, 512, 64, 64])
+        # Decoder (保持不變)
+        up0 = self.upsample_0(conv3, img_size=self.img_size)
+        self.img_size = (H2, W2)
+        deconv0 = torch.cat([up0, conv2], -1)
+        deconv0 = self.decoderlayer_0(deconv0, dino_mat2, point_feature2, normal2, img_size=self.img_size)
 
-        deconv0 = deconv0_B_C_H_W.view(deconv0_B_C_H_W.shape[0], 256, -1).permute(0, 2, 1)
+        deconv0_B_C_H_W = deconv0.view(deconv0.shape[0], H2, W2, -1).permute(0, 3, 1, 2)
+        _, deconv0_B_C_H_W, lr_feat = self.densefusion1(hr_feat=deconv0_B_C_H_W, lr_feat=conv3_B_C_H_W)
+        deconv0 = deconv0_B_C_H_W.view(deconv0_B_C_H_W.shape[0], -1, H2*W2).permute(0, 2, 1)
 
+        up1 = self.upsample_1(deconv0, img_size=self.img_size)
+        self.img_size = (H1, W1)
+        deconv1 = torch.cat([up1, conv1], -1)
+        deconv1 = self.decoderlayer_1(deconv1, dino_mat1, point_feature1, normal1, img_size=self.img_size)
 
-        # print(f'1.{deconv0.shape=}')  # conv2.shape=torch.Size([1, 4096, 256]) 1, 64, 64, 256
+        deconv1_B_C_H_W = deconv1.view(deconv1.shape[0], H1, W1, -1).permute(0, 3, 1, 2)
+        _, deconv1_B_C_H_W, lr_feat = self.densefusion2(hr_feat=deconv1_B_C_H_W, lr_feat=deconv0_B_C_H_W)
+        deconv1 = deconv1_B_C_H_W.view(deconv1_B_C_H_W.shape[0], -1, H1*W1).permute(0, 2, 1)
 
-        deconv0_B_C_H_W = deconv0.view(deconv0.shape[0], int(deconv0.shape[1]**0.5), int(deconv0.shape[1]**0.5), 256).permute(0, 3, 1, 2)  # 1, 256, 64, 64
-        # print(f'2.{deconv0_B_C_H_W.shape=}')  # 1, 256, 64, 64
+        up2 = self.upsample_2(deconv1, img_size=self.img_size)
+        self.img_size = (H0, W0)
+        deconv2 = torch.cat([up2, conv0], -1)
+        deconv2 = self.decoderlayer_2(deconv2, dino_mat, point, normal, mask, img_size=self.img_size)
 
-        up1 = self.upsample_1(deconv0, img_size = self.img_size)
-        self.img_size = (int(self.img_size[0] * 2), int(self.img_size[1] * 2))
-        # print(f'2.{conv1.shape=}, {up1.shape=}')  # conv1.shape=torch.Size([1, 16384, 64]), up1.shape=torch.Size([1, 16384, 64]) 1, 128, 128, 64
-        deconv1 = torch.cat([up1,conv1],-1)  # 1, 16384, 128
-        deconv1 = self.decoderlayer_1(deconv1, dino_mat1, point_feature1, normal1, img_size = self.img_size)
-        # print(f'2.{deconv1.shape=}')  # 1, 16384, 128  1, 128, 128, 128
-        deconv1_B_C_H_W = deconv1.view(deconv1.shape[0], int(deconv1.shape[1]**0.5), int(deconv1.shape[1]**0.5), 128).permute(0, 3, 1, 2)
-        # print(f'2.{deconv1_B_C_H_W.shape=}')  # 1, 128, 128, 128
+        deconv2_B_C_H_W = deconv2.view(deconv2.shape[0], H0, W0, -1).permute(0, 3, 1, 2)
+        _, deconv2_B_C_H_W, lr_feat = self.densefusion3(hr_feat=deconv2_B_C_H_W, lr_feat=deconv1_B_C_H_W)
+        deconv2 = deconv2_B_C_H_W.view(deconv2_B_C_H_W.shape[0], -1, H0*W0).permute(0, 2, 1)
 
-        _, deconv1_B_C_H_W, lr_feat = self.densefusion2(hr_feat=deconv1_B_C_H_W, lr_feat=deconv0_B_C_H_W)  # 1, 128, 128, 128 & 1, 256, 64, 64
-
-        # print(f'2.{deconv1_B_C_H_W.shape=}, {lr_feat.shape=}')  # hr_feat.shape=torch.Size([1, 128, 128, 128]), lr_feat.shape=torch.Size([1, 256, 128, 128])
-
-        deconv1 = deconv1_B_C_H_W.view(deconv1_B_C_H_W.shape[0], 128, -1).permute(0, 2, 1)
-        # print()
-        # print(f'3.{deconv1.shape=}')  # deconv1.shape=torch.Size([1, 16384, 128])  1, 128, 128, 128
-        
-        deconv1_B_C_H_W = deconv1.view(deconv1.shape[0], int(deconv1.shape[1]**0.5), int(deconv1.shape[1]**0.5), 128).permute(0, 3, 1, 2)  # 1, 128, 128, 128
-
-        up2 = self.upsample_2(deconv1, img_size = self.img_size)
-        self.img_size = (int(self.img_size[0] * 2), int(self.img_size[1] * 2))
-        # print(f'3.{conv0.shape=}, {up2.shape=}')  # conv0.shape=torch.Size([1, 65536, 32]), up2.shape=torch.Size([1, 65536, 32])  1, 256, 256, 32
-        deconv2 = torch.cat([up2,conv0],-1)  # 1, 256, 256, 64
-        # print(f'3.{deconv2.shape=}')  # 1, 65536, 64   1, 256, 256, 64
-        deconv2 = self.decoderlayer_2(deconv2, dino_mat, point_feature, normal, mask, img_size = self.img_size)
-        # print(f'3.{deconv2.shape=}')  # 1, 65536, 64   1, 256, 256, 64
-
-        deconv2_B_C_H_W = deconv2.view(deconv2.shape[0], int(deconv2.shape[1]**0.5), int(deconv2.shape[1]**0.5), 64).permute(0, 3, 1, 2)
-        # print(f'3.{deconv2_B_C_H_W.shape=}')
-
-        _, deconv2_B_C_H_W, lr_feat = self.densefusion3(hr_feat=deconv2_B_C_H_W, lr_feat=deconv1_B_C_H_W)  # 1, 64, 256, 256 & 1, 128, 128, 128
-
-        # print('*'*5, f'3.{deconv2_B_C_H_W.shape=}, {lr_feat.shape=}')
-
-        deconv2 = deconv2_B_C_H_W.view(deconv2_B_C_H_W.shape[0], 64, -1).permute(0, 2, 1)
-        # print(f'4.{deconv2.shape=}')
-
-        # Output Projection
-        # print(f'4.{deconv2.shape=}')
-        # print(f'4.{x.shape=}')
-        y = self.output_proj(deconv2, img_size = self.img_size) + x
+        y = self.output_proj(deconv2, img_size=self.img_size) + x
         return y
 
+if __name__ == '__main__':
+    import torch
+    # from thop import profile, clever_format
+    from torchinfo import summary
+
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ���]�v���j�p�� 512x512�A��J�� RGBD (4 channels)
+    dummy_input = torch.randn(1, 3, 512, 512).to(device)
+    dino_mat = [torch.randn(1, 1024, s, s).to(device) for s in [64, 64, 64, 64]]
+    point = torch.randn(1, 3, 512, 512).to(device)
+    normal = torch.randn(1, 3, 512, 512).to(device)
+
+    # ��l�Ƽҫ�
+    # lƼҫ
+    model = PhaSR(img_size=512, win_size=16).to(device)
+
+    # �p�� FLOPs �M�Ѽ�
+    # flops, params = profile(model, inputs=(dummy_input, dino_mat, point, normal))
+
+    # �ন��Ū�榡
+    # flops, params = clever_format([flops, params], "%.3f")
+
+    # print(f"FLOPs: {flops}")
+    # print(f"Params: {params}")
+
+
+    # ������J
+    x = torch.randn(1, 3, 512, 512).to("cuda")        # RGB
+    dino_mat = [torch.randn(1, 1024, s, s).to("cuda") for s in [64, 64, 64, 64]]
+    point = torch.randn(1, 3, 512, 512).to("cuda")
+    normal = torch.randn(1, 3, 512, 512).to("cuda")
+
+    model = PhaSR(img_size=512).to("cuda")
+
+    # �� tuple �ǤJ�h�� input
+    summary(model, input_data=(x, dino_mat, point, normal), device="cuda", col_names=["num_params"])

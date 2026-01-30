@@ -1,2 +1,8 @@
 __pycache__
 utils/__pycache__
+*.md
+dinov3*/*
+reference
+DenseSR*/*
+datasets
+*/__pycache__*
