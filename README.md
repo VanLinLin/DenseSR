@@ -49,18 +49,12 @@ pip install -r requirements.txt
 You can download WSRD dataset from [here](https://github.com/fvasluianu97/WSRD-DNSR).
 ```bash
 train_dir
-├── origin
+├── origin          <- Put the shadow affected images in this folder
 │   ├── 0000.png
 │   ├── 0001.png
 │   ├── ...
 ├── depth
-│   ├── 0000.npy
-│   ├── 0001.npy
-│   ├── ...
 ├── normal
-│   ├── 0000.npy
-│   ├── 0001.npy
-│   ├── ...
 ├── shadow_free
 │   ├── 0000.png
 │   ├── 0001.png
