@@ -57,7 +57,10 @@ output_dir
 ├──...
 ```
 
-## ✨ How to test?
+## 💫 Features
+1. You now have the exciting option to utilize DINOv3 or DINOv2 for your needs!
+2. For optimal results, consider using DepthPro from rgb2depth.ipynb instead of Depth Anything v2.
+
 1. Clone [Depth anything v2](https://github.com/DepthAnything/Depth-Anything-V2.git)
 
 ```bash
@@ -92,20 +95,21 @@ output_dir
 ├──...
 ```
 
-4. Clone [DINOv2](https://github.com/facebookresearch/dinov2.git)
+4. Clone [DINOv2](https://github.com/facebookresearch/dinov2.git) or [DINOv3](https://github.com/facebookresearch/dinov3)
 ```bash
 git clone https://github.com/facebookresearch/dinov2.git
 ```
 
-5. Download Pretrained weight
+5. Download [Pretrained weight](https://huggingface.co/VanLinLin/DenseSR)
 
-| Dataset |                                             Download Link                                             |
-| :-----: | :---------------------------------------------------------------------------------------------------: |
-|  WSRD   | [Google Drive](https://drive.google.com/file/d/1of3KLSVhaXlsX3jasuwdPKBwb4O4hGZD/view?usp=drive_link) |
-|  DSIT   |             [Google Drive](https://drive.google.com/file/d/<DSIT_ID>/view?usp=drive_link)             |
+## 🔥How to train?
+1. Run ```densesr_train.sh``` to start training.
 
+```bash
+bash densesr_train.sh
+```
 
-
+## ✨ How to test?
 1. Run ```run_test.sh``` to get inference results.
 
 ```bash
@@ -113,16 +117,15 @@ bash run_test.sh
 ```
 
 ## 📰 News
+&#10004; 2026/01/30 Release training code
+
+&#10004; 2026/01/11 Release ISTD pretrained model
+
 &#10004; 2025/08/11 Release WSRD pretrained model
 
 &#10004; 2025/08/11 Release inference code
 
 &#10004; 2025/07/05 Paper Accepted by ACMMM'25
-
-## 🛠️ TODO
-&#x25FB; Release training code
-
-&#x25FB; Release other pretrained model
 
 ## ⭐ Citation
 If you find this project useful, please consider citing us and giving us a star.
