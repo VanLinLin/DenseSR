@@ -27,11 +27,17 @@ Shadows are a common factor degrading image quality. Single-image shadow removal
 ## 👉 Overview
 ![Architecture](images/DenseSR.png)
 
+## 💫 Features
+1. **Model Flexibility:** Choose between **DINOv3** (default) or **DINOv2** for feature extraction.
+2. **Enhanced Depth Estimation:** Supports [DepthPro](https://arxiv.org/abs/2410.10815) (via `rgb2depth.ipynb`) for superior depth maps compared to Depth Anything v2.
+
+
+
 ## 🌱 Environments
 ```bash
-conda create -n ntire_shadow python=3.9 -y
+conda create -n densesr python=3.10 -y
 
-conda activate ntire_shadow
+conda activate densesr
 
 pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
 
@@ -57,11 +63,7 @@ output_dir
 ├──...
 ```
 
-## 💫 Features
-1. You now have the exciting option to utilize DINOv3 or DINOv2 for your needs!
-2. For optimal results, consider using DepthPro from rgb2depth.ipynb instead of Depth Anything v2.
-
-1. Clone [Depth anything v2](https://github.com/DepthAnything/Depth-Anything-V2.git)
+1. Clone [Depth anything v2](https://github.com/DepthAnything/Depth-Anything-V2.git) or you can just use the rgb2depth.ipynb file with DepthPro model
 
 ```bash
 git clone https://github.com/DepthAnything/Depth-Anything-V2.git
@@ -75,6 +77,26 @@ python get_depth_normap.py
 
 Now folder structure will be
 ```bash
+train_dir
+├── origin
+│   ├── 0000.png
+│   ├── 0001.png
+│   ├── ...
+├── depth
+│   ├── 0000.npy
+│   ├── 0001.npy
+│   ├── ...
+├── normal
+│   ├── 0000.npy
+│   ├── 0001.npy
+│   ├── ...
+├── shadow_free
+│   ├── 0000.png
+│   ├── 0001.png
+│   ├── ...
+
+
+
 test_dir
 ├── origin
 │   ├── 0000.png
@@ -84,7 +106,7 @@ test_dir
 │   ├── 0000.npy
 │   ├── 0001.npy
 │   ├── ...
-├── ormal
+├── normal
 │   ├── 0000.npy
 │   ├── 0001.npy
 │   ├── ...
@@ -102,11 +124,22 @@ git clone https://github.com/facebookresearch/dinov2.git
 
 5. Download [Pretrained weight](https://huggingface.co/VanLinLin/DenseSR)
 
-## 🔥How to train?
-1. Run ```densesr_train.sh``` to start training.
+## 🔥 How to train?
+1. Run `densesr_train.sh` to start training.
 
 ```bash
+# Default training (uses DINOv3)
 bash densesr_train.sh
+```
+
+To switch to **DINOv2**, you can modify `densesr_train.sh` or run the command manually:
+
+```bash
+CUDA_VISIBLE_DEVICES="0" torchrun --nproc_per_node 1 --master_port 29500 densesr_train_DDP.py \
+    --win_size 8 \
+    --train_ps 256 \
+    --dino_version dinov2 \
+    --dino_model vitl14
 ```
 
 ## ✨ How to test?
@@ -129,7 +162,7 @@ bash run_test.sh
 
 ## ⭐ Citation
 If you find this project useful, please consider citing us and giving us a star.
-```bash
+```bibtex
 @misc{lin2025densesrimageshadowremoval,
       title={DenseSR: Image Shadow Removal as Dense Prediction}, 
       author={Yu-Fan Lin and Chia-Ming Lee and Chih-Chung Hsu},
