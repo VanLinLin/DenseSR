@@ -42,7 +42,7 @@ class SlidingWindowInference:
         """Handle padding using reflection padding"""
         return F.pad(x, (0, w_pad, 0, h_pad), 'reflect')
 
-    def __call__(self, model, input_, point, normal, dino_net, device):
+    def __call__(self, model, input_, point, normal, dino_net, device, dino_patch_size=16):
         # Save original dimensions
         original_height, original_width = input_.shape[2], input_.shape[3]
         # print(f"Original size: {original_height}x{original_width}")
@@ -69,9 +69,9 @@ class SlidingWindowInference:
             # print("Image smaller than window size, processing as single padded window")
             
             # For DINO features
-            DINO_patch_size = 16
-            h_size = H * DINO_patch_size // 8
-            w_size = W * DINO_patch_size // 8
+            h_size = H * dino_patch_size // 8
+
+            w_size = W * dino_patch_size // 8
             
             UpSample_window = torch.nn.UpsamplingBilinear2d(size=(h_size, w_size))
             
@@ -114,9 +114,9 @@ class SlidingWindowInference:
                 # print(f"Processing window at ({h_idx}, {w_idx}): {input_window.shape}")
                 
                 # For DINO features
-                DINO_patch_size = 16
-                h_size = self.window_size * DINO_patch_size // 8
-                w_size = self.window_size * DINO_patch_size // 8
+                # DINO_patch_size = 16 # Removed hardcode
+                h_size = self.window_size * dino_patch_size // 8
+                w_size = self.window_size * dino_patch_size // 8
                 
                 UpSample_window = torch.nn.UpsamplingBilinear2d(size=(h_size, w_size))
                 
@@ -207,18 +207,46 @@ torch.backends.cudnn.benchmark = True
 
 
 ######### Model ###########
-if opt.dino_model == 'vits16':
-    dino_model_name = 'dinov3_vits16'
-    dino_weights = 'dinov3/checkpoints/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
-    opt.dino_dim = 384
-elif opt.dino_model == 'vitl16':
-    dino_model_name = 'dinov3_vitl16'
-    dino_weights = 'dinov3/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth'
-    opt.dino_dim = 1024
-else:
-    raise ValueError(f"Unknown dino model: {opt.dino_model}. Supported: vits16, vitl16")
+# DINO Patch Size handling
+if opt.dino_version == 'dinov3':
+    DINO_patch_size = 16
+    if opt.dino_model == 'vitl16':
+        dino_model_name = 'dinov3_vitl16'
+        dino_weights = 'dinov3/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth'
+        opt.dino_dim = 1024
+    else:
+        raise ValueError(f"For DINOv3, only 'vitl16' is supported. Got: {opt.dino_model}")
+        
+    DINO_Net = torch.hub.load('./dinov3', dino_model_name, source='local', weights=dino_weights)
 
-DINO_Net = torch.hub.load('./dinov3', dino_model_name, source='local', weights=dino_weights)
+elif opt.dino_version == 'dinov2':
+    DINO_patch_size = 14
+    # For DINOv2, we map 'vitl16' (user input/default) to 'dinov2_vitl14' or explicit 'vitl14'
+    if 'vitl' in opt.dino_model:
+        dino_model_name = 'dinov2_vitl14'
+        opt.dino_dim = 1024
+    else:
+         raise ValueError(f"For DINOv2, only 'vitl' (vitl14) is implemented here. Got: {opt.dino_model}")
+    
+    # Load DINOv2 from local source
+    # Assuming 'dinov2' directory is in current path and has hubconf.py or similar structure compatible with torch.hub.load
+    # source='local' looks for hubconf.py in the directory.
+    DINO_Net = torch.hub.load('./dinov2', dino_model_name, source='local', pretrained=False)
+    
+    # Check if we need to load weights manually or if pretrained=True handles it (normally pretrained=True downloads).
+    # If the user has local weights, we might need to load them manually if not handled by hubconf with source='local'.
+    # For now assuming we rely on hubconf or standard loading. 
+    # BUT wait, the existing code for dinov3 used 'weights' arg which is specific to that repo's hubconf?
+    # Let's check DINOv2 hubconf. It usually takes 'pretrained' arg.
+    # If weights are local, we might need to load_state_dict. 
+    # Let's assume for DINOv2 we load the model structure and the user might expect it to download or have it cached, 
+    # OR we use the default 'pretrained=True' if we want weights.
+    # However, source='local' often implies we want to run offline.
+    # Let's set pretrained=True so it tries to load weights (from cache or download).
+    DINO_Net = torch.hub.load('./dinov2', dino_model_name, source='local', pretrained=True)
+
+else:
+    raise ValueError(f"Unknown dino version: {opt.dino_version}")
 
 model_restoration = utils.get_arch(opt)
 model_restoration.to(device)
@@ -330,7 +358,12 @@ loss_scaler = NativeScaler()
 torch.cuda.empty_cache()
 
 index = 0
-DINO_patch_size = 16
+index = 0
+# DINO_patch_size is already needed above for UpSample
+# But notice UpSample is defined here in the main script loop scope.
+# DINO_patch_size was defined here as 16.
+# We set DINO_patch_size when loading the model.
+# So we just use the variable we defined earlier.
 img_multiple_of = 8 * opt.win_size
 
 # the train_ps must be the multiple of win_size
@@ -576,7 +609,8 @@ for epoch in range(start_epoch, opt.nepoch + 1):
                         point=point,
                         normal=normal,
                         dino_net=DINO_Net,
-                        device=device
+                        device=device,
+                        dino_patch_size=DINO_patch_size
                     )
 
                 # 確保輸出在合理範圍內

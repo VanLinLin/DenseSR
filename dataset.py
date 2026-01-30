@@ -16,8 +16,8 @@ class DataLoaderTrain(Dataset):
 
         self.target_transform = target_transform
         
-        gt_dir = 'shadow_free'
-        input_dir = 'origin'
+        gt_dir = 'gt'
+        input_dir = 'input'
         depth_dir = 'depth'
         normal_dir = 'normal'
 
@@ -114,8 +114,8 @@ class DataLoaderVal(Dataset):
 
         self.target_transform = target_transform
         
-        gt_dir = 'shadow_free'
-        input_dir = 'origin'
+        gt_dir = 'gt'
+        input_dir = 'input'
         depth_dir = 'depth'
         normal_dir = 'normal'
         
@@ -175,8 +175,8 @@ class DataLoaderTest(Dataset):
 
         self.target_transform = target_transform
         
-        # gt_dir = 'shadow_free'
-        input_dir = 'origin'
+        # gt_dir = 'gt'
+        input_dir = 'input'
         depth_dir = 'depth'
         normal_dir = 'normal'
         

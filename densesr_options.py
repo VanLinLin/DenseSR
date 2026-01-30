@@ -45,14 +45,11 @@ class Options():
         parser.add_argument('--train_ps', type=int, default=512, help='patch size of training sample')
         parser.add_argument('--resume', action='store_true', default=False)
         parser.add_argument('--dino_dim', type=int, default=1024, help='dim of dino features')
-        parser.add_argument('--dino_model', type=str, default='vits16', help='dino model type: vits16 or vitl16')
+        parser.add_argument('--dino_version', type=str, default='dinov3', help='dino version: dinov2 or dinov3')
+        parser.add_argument('--dino_model', type=str, default='vitl16', help='dino model type: vitl16 (for dinov3) or vitl14 (for dinov2)')
 
-
-
-        # parser.add_argument('--train_dir', type=str, default='datasets/ambient6k/sub_dataset', help='dir of train data')
-        # parser.add_argument('--val_dir', type=str, default='datasets/ambient6k/sub_dataset', help='dir of val data')
-        parser.add_argument('--train_dir', type=str, default='datasets/ambient6k/train', help='dir of train data')
-        parser.add_argument('--val_dir', type=str, default='datasets/ambient6k/test', help='dir of val data')
+        parser.add_argument('--train_dir', type=str, default='datasets/AMBIENT6K/Train', help='dir of train data')
+        parser.add_argument('--val_dir', type=str, default='datasets/AMBIENT6K/Test', help='dir of val data')
         parser.add_argument('--warmup', action='store_true', default=True, help='warmup')
         parser.add_argument('--warmup_epochs', type=int, default=3, help='epochs for warmup')
         parser.add_argument("--local-rank", type=int, default=0)
